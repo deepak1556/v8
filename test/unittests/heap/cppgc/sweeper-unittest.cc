@@ -595,5 +595,53 @@ TEST_F(SweeperTest, SweepOnAllocationTakeLastFreeListEntry) {
                 &HeapObjectHeader::FromObject(allocated_after_sweeping)));
 }
 
+TEST_F(SweeperTest, LazySweepingPrioritizesPagesWithLeastMarkedBytes) {
+  static constexpr size_t kGCObjectSize =
+      256 - sizeof(void*) - sizeof(HeapObjectHeader);
+  using GCedObject = GCed<kGCObjectSize>;
+  static_assert(v8::base::bits::IsPowerOfTwo(sizeof(GCedObject) +
+                                             sizeof(HeapObjectHeader)));
+
+  static const size_t kObjectsPerPage =
+      NormalPage::PayloadSize() /
+      (sizeof(GCedObject) + sizeof(HeapObjectHeader));
+  DCHECK_LT(4u, kObjectsPerPage);
+  PreciseGC();
+
+  // First page: almost full (all except 1 object are reachable).
+  std::vector<Persistent<GCedObject>> first_page;
+  for (size_t i = 0; i < kObjectsPerPage - 1; ++i) {
+    first_page.push_back(
+        MakeGarbageCollected<GCedObject>(GetAllocationHandle()));
+  }
+  MakeGarbageCollected<GCedObject>(GetAllocationHandle());
+
+  // Second page: only 1 reachable object, rest is garbage (much fewer marked
+  // bytes).
+  Persistent<GCedObject> second_page_live =
+      MakeGarbageCollected<GCedObject>(GetAllocationHandle());
+  BasePage* second_page = BasePage::FromPayload(second_page_live.Get());
+  for (size_t i = 1; i < kObjectsPerPage; ++i) {
+    MakeGarbageCollected<GCedObject>(GetAllocationHandle());
+  }
+
+  testing::TestPlatform::DisableBackgroundTasksScope no_concurrent_sweep_scope(
+      GetPlatformHandle().get());
+  g_destructor_callcount = 0;
+  static constexpr GCConfig config = {
+      CollectionType::kMajor, StackState::kNoHeapPointers,
+      GCConfig::MarkingType::kAtomic,
+      GCConfig::SweepingType::kIncrementalAndConcurrent};
+  Heap::From(GetHeap())->CollectGarbage(config);
+
+  // Allocating a single object should lazily sweep the second page (which has
+  // far fewer marked bytes) first, reclaiming all kObjectsPerPage - 1 dead
+  // objects on it and placing the new object on the second page.
+  GCedObject* new_object =
+      MakeGarbageCollected<GCedObject>(GetAllocationHandle());
+  EXPECT_EQ(kObjectsPerPage - 1, g_destructor_callcount);
+  EXPECT_EQ(second_page, BasePage::FromPayload(new_object));
+}
+
 }  // namespace internal
 }  // namespace cppgc

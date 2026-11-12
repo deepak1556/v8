@@ -916,13 +916,16 @@ class PrepareForSweepVisitor final
 #endif  // V8_USE_ADDRESS_SANITIZER
 
     BaseSpace::Pages space_pages = space.RemoveAllPages();
-    std::sort(space_pages.begin(), space_pages.end(),
-              [](const BasePage* a, const BasePage* b) {
-                return a->marked_bytes() < b->marked_bytes();
-              });
-    auto first_non_empty_page = std::find_if(
+    auto first_non_empty_page = std::partition(
         space_pages.begin(), space_pages.end(),
-        [](const BasePage* page) { return page->marked_bytes() != 0; });
+        [](const BasePage* page) { return page->marked_bytes() == 0; });
+    // Sort non-empty pages in descending order of marked bytes so that
+    // ThreadSafeStack::Pop() (which pops from the back) processes pages with
+    // the least marked bytes (most free memory) first.
+    std::sort(first_non_empty_page, space_pages.end(),
+              [](const BasePage* a, const BasePage* b) {
+                return a->marked_bytes() > b->marked_bytes();
+              });
     empty_normal_pages_->unswept_pages.Insert(space_pages.begin(),
                                               first_non_empty_page);
     (*space_states_)[space.index()].unswept_pages.Insert(first_non_empty_page,
