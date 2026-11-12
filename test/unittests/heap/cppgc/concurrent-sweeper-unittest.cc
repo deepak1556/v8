@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include <algorithm>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -115,6 +116,90 @@ class ConcurrentSweeperTest : public testing::TestWithHeap {
       // TryObjectHeaderFromInnerAddress returns nullptr for freelist entries.
       EXPECT_EQ(nullptr, header);
     }
+  }
+
+  // Allocates a page full of garbage objects of type `From`, collects them
+  // without sweeping, and then allocates an object of type `To` that lives in a
+  // different space with a different page layout. The allocation is expected to
+  // reuse the empty page, which requires changing its layout.
+  template <typename From, typename To>
+  void TestEmptyPageIsReusedWithDifferentLayout(bool concurrent_sweeping) {
+    static constexpr size_t kFromAllocationSize =
+        RoundUp<kAllocationGranularity>(sizeof(From) +
+                                        sizeof(HeapObjectHeader));
+    static constexpr size_t kToAllocationSize =
+        RoundUp<kAllocationGranularity>(sizeof(To) + sizeof(HeapObjectHeader));
+    static_assert(testing::CellSizeFor<From>() != testing::CellSizeFor<To>());
+
+    PreciseGC();
+
+    // First, allocate a full page of objects.
+    auto* first_object = MakeGarbageCollected<From>(GetAllocationHandle());
+    NormalPage* page = NormalPage::From(BasePage::FromPayload(first_object));
+    ASSERT_EQ(testing::CellSizeFor<From>(), page->cell_size());
+    const BaseSpace* from_space = &page->space();
+    const size_t from_objects =
+        testing::NormalPagePayloadSizeFor<From>() / kFromAllocationSize;
+    for (size_t i = 1; i < from_objects; ++i) {
+      ASSERT_EQ(page, BasePage::FromPayload(
+                          MakeGarbageCollected<From>(GetAllocationHandle())));
+    }
+
+    std::optional<testing::TestPlatform::DisableBackgroundTasksScope>
+        no_concurrent_sweep_scope;
+    if (!concurrent_sweeping) {
+      no_concurrent_sweep_scope.emplace(GetPlatformHandle().get());
+    }
+
+    // Start the GC without sweeping.
+    static constexpr GCConfig config = {
+        CollectionType::kMajor, StackState::kNoHeapPointers,
+        GCConfig::MarkingType::kAtomic,
+        GCConfig::SweepingType::kIncrementalAndConcurrent};
+    Heap::From(GetHeap())->CollectGarbage(config);
+
+    if (concurrent_sweeping) {
+      WaitForConcurrentSweeping();
+    }
+
+    // Allocate and sweep. The empty page is returned to the space of `To`.
+    auto* allocated_after_sweeping =
+        MakeGarbageCollected<To>(GetAllocationHandle());
+    ASSERT_EQ(page, BasePage::FromPayload(allocated_after_sweeping));
+    EXPECT_NE(from_space, &page->space());
+    EXPECT_EQ(testing::CellSizeFor<To>(), page->cell_size());
+    EXPECT_EQ(testing::CellSizeFor<To>(),
+              NormalPageSpace::From(page->space()).cell_size());
+    EXPECT_EQ(testing::NormalPagePayloadSizeFor<To>(), page->PayloadSize());
+    EXPECT_EQ(page->PayloadStart(),
+              reinterpret_cast<Address>(
+                  &HeapObjectHeader::FromObject(allocated_after_sweeping)));
+
+    // The whole payload of the page is usable in the new layout.
+    const size_t to_objects =
+        testing::NormalPagePayloadSizeFor<To>() / kToAllocationSize;
+    void* last_object = allocated_after_sweeping;
+    for (size_t i = 1; i < to_objects; ++i) {
+      last_object = MakeGarbageCollected<To>(GetAllocationHandle());
+      ASSERT_EQ(page, BasePage::FromPayload(last_object));
+    }
+    EXPECT_GT(2 * kToAllocationSize,
+              static_cast<size_t>(
+                  page->PayloadEnd() -
+                  HeapObjectHeader::FromObject(last_object).ObjectStart()));
+
+    // Inner pointers are resolved using the new layout.
+    for (void* object :
+         {static_cast<void*>(allocated_after_sweeping), last_object}) {
+      const HeapObjectHeader& header = HeapObjectHeader::FromObject(object);
+      EXPECT_EQ(&header, &page->ObjectHeaderFromInnerAddress(object));
+      EXPECT_EQ(&header,
+                &page->ObjectHeaderFromInnerAddress(header.ObjectEnd() - 1));
+    }
+
+    FinishSweeping();
+    // Verifies that the page is iterable in its new layout.
+    PreciseGC();
   }
 
   bool PageInBackend(const BasePage* page) {
@@ -376,7 +461,7 @@ TEST_F(ConcurrentSweeperTest, SweepOnAllocationReturnEmptyPage) {
 
   // First, allocate the full page of finalizable objects.
   const size_t objects_to_allocated =
-      NormalPage::PayloadSize() /
+      testing::NormalPagePayloadSizeFor<NormalFinalizable>() /
       (sizeof(HeapObjectHeader) + sizeof(NormalFinalizable));
   auto* first_obj =
       MakeGarbageCollected<NormalFinalizable>(GetAllocationHandle());
@@ -410,6 +495,56 @@ TEST_F(ConcurrentSweeperTest, SweepOnAllocationReturnEmptyPage) {
   EXPECT_EQ(finalizable_page,
             NormalPage::FromInnerAddress(&HeapBase::From(GetHeapHandle()),
                                          allocated_after_sweeping));
+}
+
+namespace {
+
+// Objects of different sizes that are allocated on size-class pages.
+using SmallFinalizable = Finalizable<8>;
+using OtherSmallFinalizable = Finalizable<24>;
+using SmallNonFinalizable = NonFinalizable<8>;
+using OtherSmallNonFinalizable = NonFinalizable<24>;
+static_assert(testing::CellSizeFor<SmallFinalizable>() != 0);
+static_assert(testing::CellSizeFor<OtherSmallFinalizable>() != 0);
+static_assert(testing::CellSizeFor<SmallNonFinalizable>() != 0);
+static_assert(testing::CellSizeFor<OtherSmallNonFinalizable>() != 0);
+
+// Objects that are allocated on pages with objects of mixed sizes.
+using MixedFinalizable = Finalizable<256>;
+using MixedNonFinalizable = NonFinalizable<256>;
+static_assert(testing::CellSizeFor<MixedFinalizable>() == 0);
+static_assert(testing::CellSizeFor<MixedNonFinalizable>() == 0);
+
+}  // namespace
+
+TEST_F(ConcurrentSweeperTest, EmptyPageChangesCellSizeOnFinalization) {
+  TestEmptyPageIsReusedWithDifferentLayout<SmallFinalizable,
+                                           OtherSmallFinalizable>(true);
+}
+
+TEST_F(ConcurrentSweeperTest, EmptyPageChangesCellSizeOnSweeping) {
+  TestEmptyPageIsReusedWithDifferentLayout<SmallNonFinalizable,
+                                           OtherSmallNonFinalizable>(false);
+}
+
+TEST_F(ConcurrentSweeperTest, EmptySizeClassPageBecomesMixedOnFinalization) {
+  TestEmptyPageIsReusedWithDifferentLayout<SmallFinalizable, MixedFinalizable>(
+      true);
+}
+
+TEST_F(ConcurrentSweeperTest, EmptySizeClassPageBecomesMixedOnSweeping) {
+  TestEmptyPageIsReusedWithDifferentLayout<SmallNonFinalizable,
+                                           MixedNonFinalizable>(false);
+}
+
+TEST_F(ConcurrentSweeperTest, EmptyMixedPageBecomesSizeClassOnFinalization) {
+  TestEmptyPageIsReusedWithDifferentLayout<MixedFinalizable, SmallFinalizable>(
+      true);
+}
+
+TEST_F(ConcurrentSweeperTest, EmptyMixedPageBecomesSizeClassOnSweeping) {
+  TestEmptyPageIsReusedWithDifferentLayout<MixedNonFinalizable,
+                                           SmallNonFinalizable>(false);
 }
 
 }  // namespace internal

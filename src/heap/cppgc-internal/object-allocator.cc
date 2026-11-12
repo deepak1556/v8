@@ -52,6 +52,12 @@ void AddToFreeList(NormalPageSpace& space, Address start, size_t size) {
   // No need for SetMemoryInaccessible() as LAB memory is retrieved as free
   // inaccessible memory.
   space.free_list().Add({start, size});
+  if (space.is_size_class()) {
+    // Size-class pages don't have an object start bitmap. Free list entries
+    // always cover whole cells.
+    DCHECK_EQ(0u, size % space.cell_size());
+    return;
+  }
   // Concurrent marking may be running while the LAB is set up next to a live
   // object sharing the same cell in the bitmap.
   NormalPage::From(BasePage::FromPayload(start))
@@ -73,9 +79,14 @@ void ReplaceLinearAllocationBuffer(NormalPageSpace& space,
     DCHECK_NOT_NULL(new_buffer);
     stats_collector.NotifyAllocation(new_size);
     auto* page = NormalPage::From(BasePage::FromPayload(new_buffer));
-    // Concurrent marking may be running while the LAB is set up next to a live
-    // object sharing the same cell in the bitmap.
-    page->object_start_bitmap().ClearBit<AccessMode::kAtomic>(new_buffer);
+    if (space.is_size_class()) {
+      // The LAB always covers whole cells.
+      DCHECK_EQ(0u, new_size % space.cell_size());
+    } else {
+      // Concurrent marking may be running while the LAB is set up next to a
+      // live object sharing the same cell in the bitmap.
+      page->object_start_bitmap().ClearBit<AccessMode::kAtomic>(new_buffer);
+    }
     MarkRangeAsYoung(*page, new_buffer, new_buffer + new_size);
   }
 }
@@ -259,8 +270,13 @@ void ObjectAllocator::ClampAndReplaceLinearAllocationBuffer(
   if (allocation_sampler_) {
     const size_t sample_interval = RoundUp<kAllocationGranularity>(
         allocation_sampler_->GetSampleInterval());
-    const size_t target_size = std::max(sample_interval, requested_size);
+    size_t target_size = std::max(sample_interval, requested_size);
     DCHECK(IsAligned(target_size, kAllocationGranularity));
+    if (space.is_size_class()) {
+      // Both, the LAB and the remainder must cover whole cells.
+      const size_t cell_size = space.cell_size();
+      target_size = ((target_size + cell_size - 1) / cell_size) * cell_size;
+    }
     if (sample_interval > 0 && size > target_size) {
       // Use only the first `target_size` bytes as the LAB payload and return
       // the remainder to the free list to trigger a sample on the next

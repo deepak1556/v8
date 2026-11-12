@@ -12,6 +12,7 @@
 #include "include/cppgc/heap.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
+#include "src/heap/cppgc-internal/globals.h"
 
 namespace cppgc {
 namespace internal {
@@ -22,26 +23,45 @@ class BaseSpace;
 // RawHeap is responsible for space management.
 class V8_EXPORT_PRIVATE RawHeap final {
  public:
-  // Normal spaces are used to store objects of different size classes:
-  // - kNormal1:  < 32 bytes
-  // - kNormal2:  < 64 bytes
-  // - kNormal3:  < 128 bytes
-  // - kNormal4: >= 128 bytes
-  //
-  // Objects of size greater than 2^16 get stored in the large space.
+  // Regular spaces are used to store objects depending on their allocation
+  // size (which includes the header):
+  // - [0, kNumberOfSizeClasses): Size-class spaces for objects smaller than
+  //   `kSizeClassCutoff`. There is one space per `kAllocationGranularity` step
+  //   and all objects in such a space have the exact same size. See
+  //   `SizeClassSpaceForSize()`.
+  // - kNormal: Objects of mixed sizes that are at least `kSizeClassCutoff`.
+  // - kLarge: Objects of size greater than 2^16.
   //
   // Users can override where objects are allocated via cppgc::CustomSpace to
-  // force allocation in a custom space.
+  // force allocation in a custom space. Custom spaces hold objects of mixed
+  // sizes.
   enum class RegularSpaceType : uint8_t {
-    kNormal1,
-    kNormal2,
-    kNormal3,
-    kNormal4,
+    kFirstSizeClass = 0,
+    kNormal = kNumberOfSizeClasses,
     kLarge,
   };
 
   static constexpr size_t kNumberOfRegularSpaces =
       static_cast<size_t>(RegularSpaceType::kLarge) + 1;
+
+  // Returns the size-class space for an allocation of `allocation_size` bytes.
+  // `allocation_size` includes the header and must be smaller than
+  // `kSizeClassCutoff`.
+  static constexpr RegularSpaceType SizeClassSpaceForSize(
+      size_t allocation_size) {
+    DCHECK_LE(kMinSizeClassSize, allocation_size);
+    DCHECK_GT(kSizeClassCutoff, allocation_size);
+    DCHECK_EQ(0u, allocation_size & kAllocationMask);
+    return static_cast<RegularSpaceType>((allocation_size - kMinSizeClassSize) /
+                                         kAllocationGranularity);
+  }
+
+  // Returns the size of objects in the size-class space with index
+  // `space_index`.
+  static constexpr size_t SizeForSizeClassSpace(size_t space_index) {
+    DCHECK_GT(kNumberOfSizeClasses, space_index);
+    return kMinSizeClassSize + space_index * kAllocationGranularity;
+  }
 
   using Spaces = std::vector<std::unique_ptr<BaseSpace>>;
   using iterator = Spaces::iterator;

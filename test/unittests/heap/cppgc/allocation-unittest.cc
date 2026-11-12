@@ -174,7 +174,7 @@ template <size_t Size>
 class CustomPadding final : public GarbageCollected<CustomPadding<Size>> {
  public:
   void Trace(cppgc::Visitor* visitor) const {}
-  char base_size[128];  // Gets allocated in using RegularSpaceType::kNormal4.
+  char base_size[128];  // Gets allocated in using RegularSpaceType::kNormal.
   char padding[Size];
 };
 
@@ -183,7 +183,7 @@ class alignas(kDoubleWord) AlignedCustomPadding final
     : public GarbageCollected<AlignedCustomPadding<Size>> {
  public:
   void Trace(cppgc::Visitor* visitor) const {}
-  char base_size[128];  // Gets allocated in using RegularSpaceType::kNormal4.
+  char base_size[128];  // Gets allocated in using RegularSpaceType::kNormal.
   char padding[Size];
 };
 
@@ -212,7 +212,7 @@ TEST_F(CppgcAllocationTest, AlignToDoubleWordFromUnaligned) {
                  kDoubleWord) == kWord);
 
   void* padding_object = nullptr;
-  if (NormalPage::PayloadSize() % kDoubleWord == 0) {
+  if (NormalPage::PayloadSizeFor(0) % kDoubleWord == 0) {
     padding_object = MakeGarbageCollected<PaddingObject>(GetAllocationHandle());
     ASSERT_EQ(kWord, (reinterpret_cast<uintptr_t>(padding_object) +
                       sizeof(PaddingObject)) &
@@ -241,7 +241,7 @@ TEST_F(CppgcAllocationTest, AlignToDoubleWordFromAligned) {
                  kDoubleWord) == kWord);
 
   void* padding_object = nullptr;
-  if (NormalPage::PayloadSize() % kDoubleWord == kWord) {
+  if (NormalPage::PayloadSizeFor(0) % kDoubleWord == kWord) {
     padding_object = MakeGarbageCollected<PaddingObject>(GetAllocationHandle());
     ASSERT_EQ(0u, (reinterpret_cast<uintptr_t>(padding_object) +
                    sizeof(PaddingObject)) &

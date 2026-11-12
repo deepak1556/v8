@@ -5,6 +5,7 @@
 #ifndef V8_HEAP_CPPGC_INTERNAL_HEAP_PAGE_H_
 #define V8_HEAP_CPPGC_INTERNAL_HEAP_PAGE_H_
 
+#include <algorithm>
 #include <atomic>
 
 #include "include/cppgc/internal/base-page-handle.h"
@@ -142,11 +143,11 @@ class V8_EXPORT_PRIVATE BasePage : public BasePageHandle {
   void ResetSlotSet();
 #endif  // defined(CPPGC_YOUNG_GENERATION)
 
-  void ChangeOwner(BaseSpace&);
-
  protected:
   enum class PageType : uint8_t { kNormal, kLarge };
   BasePage(HeapBase&, BaseSpace&, PageType);
+
+  void ChangeOwner(BaseSpace&);
 
  private:
   struct SlotSetDeleter {
@@ -165,6 +166,20 @@ class V8_EXPORT_PRIVATE BasePage : public BasePageHandle {
   std::atomic<size_t> marked_bytes_{0};
 };
 
+// Normal pages come in two layouts that depend on the space they belong to:
+//
+// - Mixed pages hold objects of arbitrary sizes. An `ObjectStartBitmap` that
+//   directly follows the page header is used to find the object start for inner
+//   pointers.
+// - Size-class pages (see `NormalPageSpace::is_size_class()`) are split into
+//   cells of the same size. Each cell holds a single object. The start of an
+//   object is computed from the offset of the inner pointer into the payload.
+//   Such pages don't have an `ObjectStartBitmap`; the memory is used as payload
+//   instead.
+//
+// In both layouts all memory of the payload that is not part of the LAB is
+// covered by `HeapObjectHeader`s that either describe objects or free list
+// entries, which means that both layouts are iterable in the same way.
 class V8_EXPORT_PRIVATE NormalPage final : public BasePage {
   template <typename T>
   class IteratorImpl : v8::base::iterator<std::forward_iterator_tag, T> {
@@ -237,16 +252,23 @@ class V8_EXPORT_PRIVATE NormalPage final : public BasePage {
         reinterpret_cast<const HeapObjectHeader*>(PayloadEnd()));
   }
 
-  Address PayloadStart();
-  ConstAddress PayloadStart() const;
-  Address PayloadEnd();
-  ConstAddress PayloadEnd() const;
+  inline Address PayloadStart();
+  inline ConstAddress PayloadStart() const;
+  inline Address PayloadEnd();
+  inline ConstAddress PayloadEnd() const;
 
-  static constexpr size_t PageHeaderSize() {
-    return RoundUp(sizeof(NormalPage), kAllocationGranularity);
-  }
+  // Size of the page header for a page with cells of `cell_size` bytes. A
+  // `cell_size` of 0 refers to a mixed page, in which case the header includes
+  // the `ObjectStartBitmap`.
+  static constexpr size_t PageHeaderSizeFor(size_t cell_size);
+  // The maximum header size of all layouts.
+  static constexpr size_t MaxPageHeaderSize();
+  // Size of the payload for a page with cells of `cell_size` bytes. A
+  // `cell_size` of 0 refers to a mixed page. For size-class pages, this only
+  // covers whole cells.
+  static constexpr size_t PayloadSizeFor(size_t cell_size);
 
-  static constexpr size_t PayloadSize();
+  size_t PayloadSize() const { return payload_size_; }
 
   bool PayloadContains(ConstAddress address) const {
     return (PayloadStart() <= address) && (address < PayloadEnd());
@@ -258,19 +280,61 @@ class V8_EXPORT_PRIVATE NormalPage final : public BasePage {
     allocated_bytes_at_last_gc_ = bytes;
   }
 
+  // Size-class pages are split into cells of `cell_size()` bytes that each
+  // hold a single object.
+  bool is_size_class() const { return cell_size_ != 0; }
+  size_t cell_size() const { return cell_size_; }
+
+  // Returns the address of the header of the cell that contains `address`. The
+  // cell may be free, in which case there's only a valid header if the cell is
+  // the first cell of a free list entry. Only supported on size-class pages.
+  inline const HeapObjectHeader* CellHeaderFromInnerAddress(
+      ConstAddress address) const;
+
+  // Changes the owner of the page. The layout of the page is adjusted to the
+  // new space, which is only supported for empty pages where all the payload is
+  // inaccessible (see `SetMemoryInaccessible()`).
+  void ChangeOwner(NormalPageSpace&);
+
+  // Only available for mixed pages.
   ObjectStartBitmap& object_start_bitmap() const {
-    return object_start_bitmap_;
+    DCHECK(!is_size_class());
+    return *reinterpret_cast<ObjectStartBitmap*>(const_cast<NormalPage*>(this) +
+                                                 1);
+  }
+
+  // Division by the cell size is implemented as multiplication with the
+  // reciprocal followed by a shift.
+  static constexpr size_t kCellSizeReciprocalShift = 20;
+  static constexpr uint32_t CellSizeReciprocal(size_t cell_size) {
+    const uint32_t divisor =
+        static_cast<uint32_t>(cell_size / kAllocationGranularity);
+    return ((uint32_t{1} << kCellSizeReciprocalShift) + divisor - 1) / divisor;
+  }
+  static constexpr size_t CellIndexForOffset(size_t offset,
+                                             uint32_t cell_size_reciprocal) {
+    // The result is exact for all offsets on a page as long as the divisor is
+    // smaller than 16, which is guaranteed by `kSizeClassCutoff`.
+    return static_cast<size_t>(
+        (static_cast<uint64_t>(offset / kAllocationGranularity) *
+         cell_size_reciprocal) >>
+        kCellSizeReciprocalShift);
   }
 
   void DiscardOrDecommitPages(Address begin, size_t size);
   void RecommitMemory(Address begin, size_t size);
 
  private:
-  NormalPage(HeapBase& heap, BaseSpace& space);
+  NormalPage(HeapBase& heap, NormalPageSpace& space);
   ~NormalPage() = default;
 
+  void SetLayout(size_t cell_size);
+
   size_t allocated_bytes_at_last_gc_ = 0;
-  mutable ObjectStartBitmap object_start_bitmap_;
+  uint32_t payload_size_ = 0;
+  // The following fields are only used for size-class pages.
+  uint32_t cell_size_reciprocal_ = 0;
+  uint16_t cell_size_ = 0;
   ::heap::base::ActiveSystemPages active_system_pages_;
 };
 
@@ -360,10 +424,18 @@ const HeapObjectHeader& BasePage::ObjectHeaderFromInnerAddress(
   if (is_large()) {
     return *LargePage::From(this)->ObjectHeader();
   }
+  const NormalPage* normal_page = NormalPage::From(this);
+  if (normal_page->is_size_class()) {
+    // The object start can be directly computed for size-class pages.
+    const HeapObjectHeader* header = normal_page->CellHeaderFromInnerAddress(
+        static_cast<ConstAddress>(address));
+    DCHECK_NE(kFreeListGCInfoIndex, header->GetGCInfoIndex<mode>());
+    return *header;
+  }
   // We may find other headers (before this object) because not all object start
   // bits are initially set. The fixup then makes sure that we indeed find the
   // right one.
-  ObjectStartBitmap& bitmap = NormalPage::From(this)->object_start_bitmap();
+  ObjectStartBitmap& bitmap = normal_page->object_start_bitmap();
   const HeapObjectHeader* header =
       bitmap.FindHeader<mode>(static_cast<ConstAddress>(address));
   ConstAddress object_end =
@@ -412,7 +484,14 @@ const HeapObjectHeader& BasePage::ObjectHeaderFromInnerAddressConcurrent(
   if (is_large()) {
     return *LargePage::From(this)->ObjectHeader();
   }
-  ObjectStartBitmap& bitmap = NormalPage::From(this)->object_start_bitmap();
+  const NormalPage* normal_page = NormalPage::From(this);
+  if (normal_page->is_size_class()) {
+    const HeapObjectHeader* header = normal_page->CellHeaderFromInnerAddress(
+        static_cast<ConstAddress>(address));
+    DCHECK_NE(kFreeListGCInfoIndex, header->GetGCInfoIndex<mode>());
+    return *header;
+  }
+  ObjectStartBitmap& bitmap = normal_page->object_start_bitmap();
   const HeapObjectHeader* header =
       bitmap.FindHeader<mode>(static_cast<ConstAddress>(address));
   // Make sure that the pointer is within the object bounds.
@@ -430,8 +509,63 @@ SlotSet& BasePage::GetOrAllocateSlotSet() {
 #endif  // defined(CPPGC_YOUNG_GENERATION)
 
 // static
-constexpr inline size_t NormalPage::PayloadSize() {
-  return kPageSize - RoundUp(sizeof(NormalPage), kAllocationGranularity);
+constexpr inline size_t NormalPage::PageHeaderSizeFor(size_t cell_size) {
+  if (cell_size == 0) {
+    // The object start bitmap directly follows the `NormalPage` object.
+    return RoundUp(sizeof(NormalPage) + sizeof(ObjectStartBitmap),
+                   kAllocationGranularity);
+  }
+  // Header should be un-aligned to `kAllocationGranularity` so that adding a
+  // `HeapObjectHeader` gets the user object in the first cell aligned to
+  // `kMaxSupportedAlignment`. This way all objects in cells with a size that is
+  // a multiple of `kMaxSupportedAlignment` are aligned to
+  // `kMaxSupportedAlignment` as well.
+  return RoundUp(sizeof(NormalPage) + sizeof(HeapObjectHeader),
+                 api_constants::kMaxSupportedAlignment) -
+         sizeof(HeapObjectHeader);
+}
+
+// static
+constexpr inline size_t NormalPage::MaxPageHeaderSize() {
+  return std::max(PageHeaderSizeFor(0), PageHeaderSizeFor(kMinSizeClassSize));
+}
+
+// static
+constexpr inline size_t NormalPage::PayloadSizeFor(size_t cell_size) {
+  const size_t max_payload_size = kPageSize - PageHeaderSizeFor(cell_size);
+  if (cell_size == 0) {
+    return max_payload_size;
+  }
+  // Only whole cells are part of the payload.
+  return max_payload_size - (max_payload_size % cell_size);
+}
+
+Address NormalPage::PayloadStart() {
+  return reinterpret_cast<Address>(this) + PageHeaderSizeFor(cell_size_);
+}
+
+ConstAddress NormalPage::PayloadStart() const {
+  return const_cast<NormalPage*>(this)->PayloadStart();
+}
+
+Address NormalPage::PayloadEnd() { return PayloadStart() + PayloadSize(); }
+
+ConstAddress NormalPage::PayloadEnd() const {
+  return const_cast<NormalPage*>(this)->PayloadEnd();
+}
+
+const HeapObjectHeader* NormalPage::CellHeaderFromInnerAddress(
+    ConstAddress address) const {
+  DCHECK(is_size_class());
+  // Make sure that the pointer is within the payload and thus within the bounds
+  // of the cell returned.
+  CHECK(PayloadContains(address));
+  const ConstAddress payload_start = PayloadStart();
+  const size_t offset = static_cast<size_t>(address - payload_start);
+  const size_t cell_index = CellIndexForOffset(offset, cell_size_reciprocal_);
+  DCHECK_EQ(offset / cell_size_, cell_index);
+  return reinterpret_cast<const HeapObjectHeader*>(payload_start +
+                                                   cell_index * cell_size_);
 }
 
 }  // namespace internal

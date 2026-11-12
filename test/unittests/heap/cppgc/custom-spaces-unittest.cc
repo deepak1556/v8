@@ -123,7 +123,7 @@ TEST_F(TestWithHeapWithCustomSpaces, AllocateOnCustomSpaces) {
             NormalPage::FromPayload(custom1)->space().index());
   EXPECT_EQ(RawHeap::kNumberOfRegularSpaces + 1,
             NormalPage::FromPayload(custom2)->space().index());
-  EXPECT_EQ(static_cast<size_t>(RawHeap::RegularSpaceType::kNormal1),
+  EXPECT_GT(RawHeap::kNumberOfRegularSpaces,
             NormalPage::FromPayload(regular)->space().index());
 }
 
@@ -159,7 +159,7 @@ TEST_F(TestWithHeapWithCustomSpaces,
             NormalPage::FromPayload(custom1)->space().index());
   EXPECT_EQ(RawHeap::kNumberOfRegularSpaces,
             NormalPage::FromPayload(custom2)->space().index());
-  EXPECT_EQ(static_cast<size_t>(RawHeap::RegularSpaceType::kNormal1),
+  EXPECT_GT(RawHeap::kNumberOfRegularSpaces,
             NormalPage::FromPayload(regular)->space().index());
 }
 

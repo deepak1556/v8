@@ -6,11 +6,14 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstring>
 
 #include "include/cppgc/internal/api-constants.h"
 #include "src/base/bits.h"
 #include "src/base/logging.h"
 #include "src/base/platform/mutex.h"
+#include "src/base/sanitizer/asan.h"
+#include "src/base/sanitizer/msan.h"
 #include "src/heap/cppgc-internal/globals.h"
 #include "src/heap/cppgc-internal/heap-object-header.h"
 #include "src/heap/cppgc-internal/heap-space.h"
@@ -26,9 +29,34 @@ namespace cppgc::internal {
 
 namespace {
 
-Address AlignAddress(Address address, size_t alignment) {
-  return reinterpret_cast<Address>(
-      RoundUp(reinterpret_cast<uintptr_t>(address), alignment));
+// Returns true if the cell starting at `header` on a size-class page is free.
+// Free cells are either the first cell of a free list entry, in which case
+// they have a valid header, or they are in the inaccessible state, see
+// `SetMemoryInaccessible()`.
+bool IsFreeCell(const HeapObjectHeader* header) {
+#if defined(V8_USE_MEMORY_SANITIZER)
+  // Inaccessible memory is zeroed but marked as uninitialized.
+  MSAN_MEMORY_IS_INITIALIZED(header, sizeof(HeapObjectHeader));
+#elif defined(V8_USE_ADDRESS_SANITIZER)
+  // Inaccessible memory is zeroed but poisoned.
+  AsanUnpoisonScope unpoison_scope(header, sizeof(HeapObjectHeader));
+#elif DEBUG
+  // Inaccessible memory is zapped. Zapped memory never looks like a regular
+  // object header as the bit pattern has an otherwise unused bit set.
+  static constexpr uint8_t kZappedHeader[sizeof(HeapObjectHeader)] = {
+      kZappedValue, kZappedValue, kZappedValue, kZappedValue,
+#if defined(V8_HOST_ARCH_64_BIT)
+      kZappedValue, kZappedValue, kZappedValue, kZappedValue,
+#endif  // defined(V8_HOST_ARCH_64_BIT)
+  };
+  if (memcmp(header, kZappedHeader, sizeof(HeapObjectHeader)) == 0) {
+    return true;
+  }
+#endif
+  // In all other configurations inaccessible memory is zeroed and thus has
+  // `kFreeListGCInfoIndex` as GCInfoIndex.
+  static_assert(kFreeListGCInfoIndex == 0);
+  return header->IsFree();
 }
 
 }  // namespace
@@ -87,8 +115,7 @@ ConstAddress BasePage::PayloadEnd() const {
 size_t BasePage::AllocatedSize() const {
   return is_large() ? LargePage::PageHeaderSize() +
                           LargePage::From(this)->PayloadSize()
-                    : NormalPage::From(this)->PayloadSize() +
-                          RoundUp(sizeof(NormalPage), kAllocationGranularity);
+                    : kPageSize;
 }
 
 size_t BasePage::AllocatedBytesAtLastGC() const {
@@ -120,7 +147,13 @@ const HeapObjectHeader* BasePage::TryObjectHeaderFromInnerAddress(
                 .linear_allocation_buffer()
                 .size());
 
-    ObjectStartBitmap& bitmap = NormalPage::From(this)->object_start_bitmap();
+    if (normal_page->is_size_class()) {
+      const HeapObjectHeader* header = normal_page->CellHeaderFromInnerAddress(
+          static_cast<ConstAddress>(address));
+      return IsFreeCell(header) ? nullptr : header;
+    }
+
+    ObjectStartBitmap& bitmap = normal_page->object_start_bitmap();
     const HeapObjectHeader* header = bitmap.FindHeader<AccessMode::kNonAtomic>(
         static_cast<ConstAddress>(address));
 
@@ -191,6 +224,37 @@ void BasePage::ChangeOwner(BaseSpace& space) {
   space_ = &space;
 }
 
+void NormalPage::ChangeOwner(NormalPageSpace& space) {
+  BasePage::ChangeOwner(space);
+  const size_t new_cell_size = space.cell_size();
+  if (new_cell_size == cell_size_) return;
+
+  // The layout of the page changes which requires the page to be empty.
+  DCHECK_EQ(0u, marked_bytes());
+  const Address old_payload_start = PayloadStart();
+  SetLayout(new_cell_size);
+  const Address new_payload_start = PayloadStart();
+  if (new_payload_start < old_payload_start) {
+    // Mixed page to size-class page: The memory used for the object start
+    // bitmap is now part of the payload and must be in the same state as the
+    // rest of the payload.
+    DCHECK(is_size_class());
+    SetMemoryInaccessible(new_payload_start,
+                          old_payload_start - new_payload_start);
+  } else if (old_payload_start < new_payload_start) {
+    // Size-class page to mixed page: The start of the payload is now used for
+    // the object start bitmap.
+    DCHECK(!is_size_class());
+    SetMemoryAccessible(old_payload_start,
+                        new_payload_start - old_payload_start);
+    ObjectStartBitmap* bitmap = new (&object_start_bitmap()) ObjectStartBitmap;
+    // The page is empty and callers represent it as a single free list entry
+    // that starts at the payload start.
+    bitmap->SetBit(new_payload_start);
+  }
+  SynchronizedStore();
+}
+
 // static
 NormalPage* NormalPage::TryCreate(PageBackend& page_backend,
                                   NormalPageSpace& space) {
@@ -209,8 +273,14 @@ NormalPage* NormalPage::TryCreate(PageBackend& page_backend,
   // invariant that memory is in the same state as it would be after sweeping.
   // This allows to return newly allocated pages to go into that LAB and back
   // into the free list.
+  //
+  // This covers all memory up to the end of the page, i.e., also the memory
+  // after the last cell of a size-class page that is not part of the payload.
+  // That memory may become payload when the layout of the page changes, see
+  // `NormalPage::ChangeOwner()`.
   Address begin = normal_page->PayloadStart() + sizeof(HeapObjectHeader);
-  const size_t size = normal_page->PayloadSize() - sizeof(HeapObjectHeader);
+  const size_t size = static_cast<size_t>(
+      reinterpret_cast<Address>(normal_page) + kPageSize - begin);
 #if defined(V8_USE_MEMORY_SANITIZER)
   MSAN_ALLOCATED_UNINITIALIZED_MEMORY(begin, size);
 #elif defined(V8_USE_ADDRESS_SANITIZER)
@@ -241,14 +311,25 @@ void NormalPage::Destroy(NormalPage* page) {
       heap.decommit_free_memory() && discarded_memory > 0);
 }
 
-NormalPage::NormalPage(HeapBase& heap, BaseSpace& space)
-    : BasePage(heap, space, PageType::kNormal), object_start_bitmap_() {
-  DCHECK_LT(kLargeObjectSizeThreshold,
-            static_cast<size_t>(PayloadEnd() - PayloadStart()));
+NormalPage::NormalPage(HeapBase& heap, NormalPageSpace& space)
+    : BasePage(heap, space, PageType::kNormal) {
+  SetLayout(space.cell_size());
+  if (!is_size_class()) {
+    new (&object_start_bitmap()) ObjectStartBitmap;
+    DCHECK_LT(kLargeObjectSizeThreshold,
+              static_cast<size_t>(PayloadEnd() - PayloadStart()));
+  }
   const size_t commit_page_size =
       heap.platform()->GetPageAllocator()->CommitPageSize();
   active_system_pages_.Init(
       kPageSize, v8::base::bits::WhichPowerOfTwo(commit_page_size), kPageSize);
+}
+
+void NormalPage::SetLayout(size_t cell_size) {
+  DCHECK_GT(kSizeClassCutoff, cell_size);
+  cell_size_ = static_cast<uint16_t>(cell_size);
+  cell_size_reciprocal_ = cell_size ? CellSizeReciprocal(cell_size) : 0;
+  payload_size_ = static_cast<uint32_t>(PayloadSizeFor(cell_size));
 }
 
 void NormalPage::DiscardOrDecommitPages(Address begin, size_t size) {
@@ -327,21 +408,6 @@ NormalPage::const_iterator NormalPage::begin() const {
   return const_iterator(
       reinterpret_cast<const HeapObjectHeader*>(PayloadStart()), lab.start(),
       lab.size());
-}
-
-Address NormalPage::PayloadStart() {
-  return AlignAddress((reinterpret_cast<Address>(this + 1)),
-                      kAllocationGranularity);
-}
-
-ConstAddress NormalPage::PayloadStart() const {
-  return const_cast<NormalPage*>(this)->PayloadStart();
-}
-
-Address NormalPage::PayloadEnd() { return PayloadStart() + PayloadSize(); }
-
-ConstAddress NormalPage::PayloadEnd() const {
-  return const_cast<NormalPage*>(this)->PayloadEnd();
 }
 
 LargePage::LargePage(HeapBase& heap, BaseSpace& space, size_t size)

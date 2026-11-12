@@ -31,7 +31,7 @@ class AgeTableTest : public testing::TestSupportingAllocationOnly {
   NormalPage* AllocateNormalPage() {
     RawHeap& heap = Heap::From(GetHeap())->raw_heap();
     auto* space = static_cast<NormalPageSpace*>(
-        heap.Space(RawHeap::RegularSpaceType::kNormal1));
+        heap.Space(RawHeap::RegularSpaceType::kNormal));
     auto* page =
         NormalPage::TryCreate(*Heap::From(GetHeap())->page_backend(), *space);
     CHECK_NOT_NULL(page);

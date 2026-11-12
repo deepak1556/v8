@@ -146,8 +146,8 @@ TEST_F(SweeperTest, DontSweepMarkedLargeObject) {
 TEST_F(SweeperTest, SweepMultipleObjectsOnPage) {
   constexpr size_t kObjectSize = 8;
   using Type = GCed<kObjectSize>;
-  const size_t kNumberOfObjects =
-      NormalPage::PayloadSize() / (sizeof(Type) + sizeof(HeapObjectHeader));
+  const size_t kNumberOfObjects = testing::NormalPagePayloadSizeFor<Type>() /
+                                  (sizeof(Type) + sizeof(HeapObjectHeader));
 
   for (size_t i = 0; i < kNumberOfObjects; ++i) {
     MakeGarbageCollected<Type>(GetAllocationHandle());
@@ -287,7 +287,7 @@ TEST_F(SweeperTest, LazySweepingDuringAllocation) {
                                              sizeof(HeapObjectHeader)));
 
   static const size_t kObjectsPerPage =
-      NormalPage::PayloadSize() /
+      testing::NormalPagePayloadSizeFor<GCedObject>() /
       (sizeof(GCedObject) + sizeof(HeapObjectHeader));
   // This test expects each page contain at least 2 objects.
   DCHECK_LT(2u, kObjectsPerPage);
@@ -603,7 +603,7 @@ TEST_F(SweeperTest, LazySweepingPrioritizesPagesWithLeastMarkedBytes) {
                                              sizeof(HeapObjectHeader)));
 
   static const size_t kObjectsPerPage =
-      NormalPage::PayloadSize() /
+      NormalPage::PayloadSizeFor(0) /
       (sizeof(GCedObject) + sizeof(HeapObjectHeader));
   DCHECK_LT(4u, kObjectsPerPage);
   PreciseGC();

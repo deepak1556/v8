@@ -9,6 +9,9 @@
 #include "include/cppgc/heap.h"
 #include "include/cppgc/macros.h"
 #include "include/cppgc/platform.h"
+#include "src/heap/cppgc-internal/globals.h"
+#include "src/heap/cppgc-internal/heap-object-header.h"
+#include "src/heap/cppgc-internal/heap-page.h"
 #include "src/heap/cppgc-internal/heap.h"
 #include "src/heap/cppgc-internal/trace-event.h"
 #include "test/unittests/heap/cppgc/test-platform.h"
@@ -17,6 +20,24 @@
 namespace cppgc {
 namespace internal {
 namespace testing {
+
+// Returns the cell size of the pages that regular objects of type `T` (without
+// any additional bytes) are allocated on. Returns 0 for objects that are not
+// allocated on size-class pages.
+template <typename T>
+constexpr size_t CellSizeFor() {
+  const size_t allocation_size =
+      RoundUp<kAllocationGranularity>(sizeof(T) + sizeof(HeapObjectHeader));
+  return allocation_size < kSizeClassCutoff ? allocation_size : 0;
+}
+
+// Returns the payload size of the normal pages that regular objects of type
+// `T` (without any additional bytes) are allocated on.
+template <typename T>
+constexpr size_t NormalPagePayloadSizeFor() {
+  return NormalPage::PayloadSizeFor(CellSizeFor<T>());
+}
+
 class DelegatingTracingController : public TracingController {
  public:
 #if !defined(V8_USE_PERFETTO)

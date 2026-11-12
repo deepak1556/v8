@@ -79,7 +79,7 @@ class V8_EXPORT_PRIVATE ObjectAllocator final : public cppgc::AllocationHandle {
   bool in_disallow_gc_scope() const;
 
   // Returns the initially tried SpaceType to allocate an object of |size| bytes
-  // on. Returns the largest regular object size bucket for large objects.
+  // on. Returns the space for mixed-size objects for large objects.
   inline static RawHeap::RegularSpaceType GetInitialSpaceIndexForSize(
       size_t size);
 
@@ -162,11 +162,27 @@ void* ObjectAllocator::AllocateObject(size_t size, AlignVal alignment,
 #if !defined(V8_HOST_ARCH_64_BIT)
   CHECK_GT(allocation_size, size);
 #endif
-  const RawHeap::RegularSpaceType type =
-      GetInitialSpaceIndexForSize(allocation_size);
+  static_assert(api_constants::kMaxSupportedAlignment ==
+                2 * kAllocationGranularity);
+  DCHECK_EQ(api_constants::kMaxSupportedAlignment,
+            static_cast<size_t>(alignment));
+  // All objects in size-class spaces with a cell size that is a multiple of
+  // the alignment are properly aligned. Use such a space if possible.
+  const size_t aligned_allocation_size =
+      RoundUp<api_constants::kMaxSupportedAlignment>(allocation_size);
+  if (aligned_allocation_size < kSizeClassCutoff) {
+    void* object = AllocateObjectOnSpace<may_contain_mixins>(
+        NormalPageSpace::From(*raw_heap_.Space(
+            RawHeap::SizeClassSpaceForSize(aligned_allocation_size))),
+        aligned_allocation_size, gcinfo);
+    DCHECK(IsAligned(reinterpret_cast<uintptr_t>(object),
+                     api_constants::kMaxSupportedAlignment));
+    return object;
+  }
   return AllocateObjectOnSpace<may_contain_mixins>(
-      NormalPageSpace::From(*raw_heap_.Space(type)), allocation_size, alignment,
-      gcinfo);
+      NormalPageSpace::From(
+          *raw_heap_.Space(RawHeap::RegularSpaceType::kNormal)),
+      allocation_size, alignment, gcinfo);
 }
 
 template <ObjectAllocator::MayContainMixins may_contain_mixins>
@@ -213,14 +229,10 @@ void* ObjectAllocator::AllocateObject(size_t size, AlignVal alignment,
 // static
 RawHeap::RegularSpaceType ObjectAllocator::GetInitialSpaceIndexForSize(
     size_t size) {
-  static_assert(kSmallestSpaceSize == 32,
-                "should be half the next larger size");
-  if (size < 64) {
-    if (size < kSmallestSpaceSize) return RawHeap::RegularSpaceType::kNormal1;
-    return RawHeap::RegularSpaceType::kNormal2;
+  if (size < kSizeClassCutoff) {
+    return RawHeap::SizeClassSpaceForSize(size);
   }
-  if (size < 128) return RawHeap::RegularSpaceType::kNormal3;
-  return RawHeap::RegularSpaceType::kNormal4;
+  return RawHeap::RegularSpaceType::kNormal;
 }
 
 void* ObjectAllocator::OutOfLineAllocate(NormalPageSpace& space, size_t size,
@@ -283,6 +295,8 @@ template <ObjectAllocator::MayContainMixins may_contain_mixins>
 void* ObjectAllocator::AllocateObjectOnSpace(NormalPageSpace& space,
                                              size_t size, GCInfoIndex gcinfo) {
   DCHECK_LT(0u, gcinfo);
+  // Objects in size-class spaces occupy exactly one cell.
+  DCHECK_IMPLIES(space.is_size_class(), size == space.cell_size());
 
   NormalPageSpace::LinearAllocationBuffer& current_lab =
       space.linear_allocation_buffer();
@@ -304,23 +318,28 @@ void* ObjectAllocator::AllocateObjectOnSpace(NormalPageSpace& space,
   auto* header = new (raw) HeapObjectHeader(size, gcinfo);
 
   if constexpr (may_contain_mixins == MayContainMixins::kYes) {
-    // Only set the bit for mixins to make sure the concurrent marker may find
-    // them.
-    NormalPage::From(BasePage::FromPayload(header))
-        ->object_start_bitmap()
-        .SetBit<AccessMode::kAtomic>(reinterpret_cast<ConstAddress>(header));
-    // Ensure that the header and object start bit writes are visible before the
-    // object is visible to other threads. "Publication" here may happen via
-    // relaxed stores (on e.g. `Member`) which otherwise can move around.
+    // Size-class pages don't have an object start bitmap. The object start is
+    // computed from the immutable layout of the page instead, which means that
+    // mixins are treated the same way as regular objects.
+    if (!space.is_size_class()) {
+      // Only set the bit for mixins to make sure the concurrent marker may find
+      // them.
+      NormalPage::From(BasePage::FromPayload(header))
+          ->object_start_bitmap()
+          .SetBit<AccessMode::kAtomic>(reinterpret_cast<ConstAddress>(header));
+      // Ensure that the header and object start bit writes are visible before
+      // the object is visible to other threads. "Publication" here may happen
+      // via relaxed stores (on e.g. `Member`) which otherwise can move around.
 #if (defined(V8_HOST_ARCH_ARM64) || defined(V8_HOST_ARCH_ARM)) && \
     (defined(__clang__) || defined(V8_CC_GNU)) && !defined(THREAD_SANITIZER)
-    // On ARM/ARM64 we only need a Store-Store fence (`dmb ishst`) to order the
-    // header and bitmap stores before subsequent publishing stores, avoiding
-    // draining prior loads as a full `dmb ish` would.
-    __asm__ __volatile__("dmb ishst" ::: "memory");
+      // On ARM/ARM64 we only need a Store-Store fence (`dmb ishst`) to order
+      // the header and bitmap stores before subsequent publishing stores,
+      // avoiding draining prior loads as a full `dmb ish` would.
+      __asm__ __volatile__("dmb ishst" ::: "memory");
 #else
-    std::atomic_thread_fence(std::memory_order_release);
+      std::atomic_thread_fence(std::memory_order_release);
 #endif
+    }
   }
 
   return header->ObjectStart();

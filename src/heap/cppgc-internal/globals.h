@@ -48,6 +48,18 @@ constexpr size_t kLargeObjectSizeThreshold = kPageSize / 2;
 constexpr GCInfoIndex kFreeListGCInfoIndex = 0;
 constexpr size_t kFreeListEntrySize = 2 * sizeof(uintptr_t);
 
+// Regular objects with an allocation size (including the header) below
+// `kSizeClassCutoff` are allocated on size-class pages. All objects on such a
+// page occupy a cell of the same size, which allows for computing the object
+// start from an inner pointer without an object start bitmap.
+//
+// There is one size class per `kAllocationGranularity` step, i.e., size classes
+// are exact and don't result in any internal fragmentation.
+constexpr size_t kMinSizeClassSize = kFreeListEntrySize;
+constexpr size_t kSizeClassCutoff = 16 * kAllocationGranularity;
+constexpr size_t kNumberOfSizeClasses =
+    (kSizeClassCutoff - kMinSizeClassSize) / kAllocationGranularity;
+
 #if defined(CPPGC_POINTER_COMPRESSION)
 constexpr size_t kSlotSize = sizeof(uint32_t);
 #else   // !defined(CPPGC_POINTER_COMPRESSION)

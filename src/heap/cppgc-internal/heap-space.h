@@ -98,7 +98,11 @@ class V8_EXPORT_PRIVATE NormalPageSpace final : public BaseSpace {
     return From(const_cast<BaseSpace&>(space));
   }
 
-  NormalPageSpace(RawHeap* heap, size_t index, bool is_compactable);
+  // `cell_size` is the allocation size (including the header) of all objects in
+  // a size-class space. A `cell_size` of 0 denotes a space that holds objects
+  // of mixed sizes.
+  NormalPageSpace(RawHeap* heap, size_t index, bool is_compactable,
+                  size_t cell_size = 0);
 
   LinearAllocationBuffer& linear_allocation_buffer() { return current_lab_; }
   const LinearAllocationBuffer& linear_allocation_buffer() const {
@@ -108,9 +112,16 @@ class V8_EXPORT_PRIVATE NormalPageSpace final : public BaseSpace {
   FreeList& free_list() { return free_list_; }
   const FreeList& free_list() const { return free_list_; }
 
+  // Size-class spaces only hold objects of size `cell_size()`. Their pages are
+  // split into cells of that size and don't have an object start bitmap. Free
+  // list entries and the LAB of such spaces always cover whole cells.
+  bool is_size_class() const { return cell_size_ != 0; }
+  size_t cell_size() const { return cell_size_; }
+
  private:
   LinearAllocationBuffer current_lab_;
   FreeList free_list_;
+  const size_t cell_size_;
 };
 
 class V8_EXPORT_PRIVATE LargePageSpace final : public BaseSpace {

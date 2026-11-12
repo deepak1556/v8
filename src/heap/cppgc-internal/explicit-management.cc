@@ -77,7 +77,9 @@ void ExplicitManagementImpl::FreeUnreferencedObject(HeapHandle& heap_handle,
     SetMemoryInaccessible(&header, header_size);
     if (payload_end == lab.start()) {  // Returning to LAB.
       lab.Set(reinterpret_cast<Address>(&header), lab.size() + header_size);
-      normal_page->object_start_bitmap().ClearBit(lab.start());
+      if (!normal_page->is_size_class()) {
+        normal_page->object_start_bitmap().ClearBit(lab.start());
+      }
     } else {  // Returning to free list.
       base_page->heap().stats_collector()->NotifyExplicitFree(header_size);
       normal_space.free_list().Add({&header, header_size});
@@ -197,6 +199,13 @@ bool ExplicitManagementImpl::Resize(void* object, size_t new_object_size) {
 
   auto& header = HeapObjectHeader::FromObject(object);
   const size_t old_size = header.AllocatedSize();
+  if (NormalPage::From(base_page)->is_size_class()) {
+    // Objects on size-class pages occupy exactly one cell and cannot be resized
+    // in place. Shrinking is reported as success, as we want to avoid that
+    // embedders start copying memory because of small deltas.
+    DCHECK_EQ(old_size, NormalPage::From(base_page)->cell_size());
+    return new_size <= old_size;
+  }
   if (new_size > old_size) {
     return Grow(header, *base_page, new_size, new_size - old_size);
   } else if (old_size > new_size) {

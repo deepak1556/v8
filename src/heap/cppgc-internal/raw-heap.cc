@@ -16,10 +16,13 @@ RawHeap::RawHeap(
     HeapBase* heap,
     const std::vector<std::unique_ptr<CustomSpaceBase>>& custom_spaces)
     : main_heap_(heap) {
-  size_t i = 0;
-  for (; i < static_cast<size_t>(RegularSpaceType::kLarge); ++i) {
-    spaces_.push_back(std::make_unique<NormalPageSpace>(this, i, false));
+  for (size_t i = 0; i < kNumberOfSizeClasses; ++i) {
+    spaces_.push_back(std::make_unique<NormalPageSpace>(
+        this, i, false, SizeForSizeClassSpace(i)));
   }
+  DCHECK_EQ(static_cast<size_t>(RegularSpaceType::kNormal), spaces_.size());
+  spaces_.push_back(std::make_unique<NormalPageSpace>(
+      this, static_cast<size_t>(RegularSpaceType::kNormal), false));
   spaces_.push_back(std::make_unique<LargePageSpace>(
       this, static_cast<size_t>(RegularSpaceType::kLarge)));
   DCHECK_EQ(kNumberOfRegularSpaces, spaces_.size());

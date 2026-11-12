@@ -78,6 +78,9 @@ constexpr const char* ToString(MutatorThreadSweepingMode sweeping_mode) {
   UNREACHABLE();
 }
 
+// Verifies that the object start bitmap of mixed pages is consistent with the
+// headers on the page. For size-class pages, which don't have such a bitmap,
+// verifies that the headers are consistent with the cells of the page.
 class ObjectStartBitmapVerifier final
     : private HeapVisitor<ObjectStartBitmapVerifier> {
   friend class HeapVisitor<ObjectStartBitmapVerifier>;
@@ -96,8 +99,9 @@ class ObjectStartBitmapVerifier final
 
  private:
   bool VisitNormalPage(NormalPage& page) {
-    // Remember bitmap and reset previous pointer.
-    bitmap_ = &page.object_start_bitmap();
+    // Remember page and bitmap and reset previous pointer.
+    page_ = &page;
+    bitmap_ = page.is_size_class() ? nullptr : &page.object_start_bitmap();
     prev_ = nullptr;
     return false;
   }
@@ -106,6 +110,23 @@ class ObjectStartBitmapVerifier final
     if (header.IsLargeObject()) return true;
 
     auto* raw_header = reinterpret_cast<ConstAddress>(&header);
+    if (!bitmap_) {
+      // Size-class page: Objects occupy exactly one cell. Free list entries
+      // cover whole cells.
+      const size_t cell_size = page_->cell_size();
+      CHECK_EQ(0u, static_cast<size_t>(raw_header - page_->PayloadStart()) %
+                       cell_size);
+      if (header.IsFree()) {
+        CHECK_EQ(0u, header.AllocatedSize() % cell_size);
+      } else {
+        CHECK_EQ(cell_size, header.AllocatedSize());
+        const HeapObjectHeader* const expected = &header;
+        CHECK_EQ(expected, page_->CellHeaderFromInnerAddress(raw_header));
+        CHECK_EQ(expected,
+                 page_->CellHeaderFromInnerAddress(raw_header + cell_size - 1));
+      }
+      return true;
+    }
     CHECK(bitmap_->CheckBit<AccessMode::kAtomic>(raw_header));
     if (prev_) {
       // No other bits in the range [prev_, raw_header) should be set.
@@ -115,6 +136,7 @@ class ObjectStartBitmapVerifier final
     return true;
   }
 
+  NormalPage* page_ = nullptr;
   ObjectStartBitmap* bitmap_ = nullptr;
   HeapObjectHeader* prev_ = nullptr;
 };
@@ -348,26 +370,39 @@ typename FinalizationBuilder::ResultType SweepNormalPage(
   constexpr auto kAtomicAccess = AccessMode::kAtomic;
   FinalizationBuilder builder(*page, page_allocator);
 
-  ObjectStartBitmap& bitmap = page->object_start_bitmap();
+  // Size-class pages don't have an object start bitmap. On such pages all
+  // headers are aligned to cells, which means that gaps and thus free list
+  // entries always cover whole cells.
+  ObjectStartBitmap* const bitmap =
+      page->is_size_class() ? nullptr : &page->object_start_bitmap();
 
   size_t live_bytes = 0;
 
   Address start_of_gap = page->PayloadStart();
 
-  const auto clear_bit_if_coalesced_entry = [&bitmap,
+  const auto set_bit = [bitmap](Address address) {
+    if (bitmap) {
+      bitmap->SetBit<AccessMode::kAtomic>(address);
+    }
+  };
+
+  const auto clear_bit_if_coalesced_entry = [bitmap,
                                              &start_of_gap](Address address) {
+    if (!bitmap) {
+      return;
+    }
     if (address != start_of_gap) {
       // Clear only if not the first freed entry.
-      bitmap.ClearBit<AccessMode::kAtomic>(address);
+      bitmap->ClearBit<AccessMode::kAtomic>(address);
     } else {
       // Otherwise, set the bit.
-      bitmap.SetBit<AccessMode::kAtomic>(address);
+      bitmap->SetBit<AccessMode::kAtomic>(address);
     }
   };
 
   for (Address begin = page->PayloadStart(), end = page->PayloadEnd();
        begin != end;) {
-    bitmap.SetBit<AccessMode::kAtomic>(begin);
+    set_bit(begin);
     HeapObjectHeader* header = reinterpret_cast<HeapObjectHeader*>(begin);
     const size_t size = header->AllocatedSize();
     // Check if this is a free list entry.
@@ -393,7 +428,7 @@ typename FinalizationBuilder::ResultType SweepNormalPage(
       const size_t new_free_list_entry_size =
           static_cast<size_t>(header_address - start_of_gap);
       builder.AddFreeListEntry(start_of_gap, new_free_list_entry_size);
-      bitmap.SetBit<AccessMode::kAtomic>(start_of_gap);
+      set_bit(start_of_gap);
     }
     StickyUnmark(header, sticky_bits);
     begin += size;
@@ -410,7 +445,7 @@ typename FinalizationBuilder::ResultType SweepNormalPage(
   if (!is_empty && start_of_gap != page->PayloadEnd()) {
     builder.AddFreeListEntry(
         start_of_gap, static_cast<size_t>(page->PayloadEnd() - start_of_gap));
-    bitmap.SetBit<AccessMode::kAtomic>(start_of_gap);
+    set_bit(start_of_gap);
   }
   page->SetAllocatedBytesAtLastGC(live_bytes);
   page->ResetMarkedBytes(sticky_bits == StickyBits::kDisabled ? 0 : live_bytes);
@@ -556,7 +591,7 @@ class SweepFinalizer final {
       // pages for that space. Otherwise just retain the current space for an
       // empty page.
       if (space_) {
-        normal_page->ChangeOwner(*space_);
+        normal_page->ChangeOwner(NormalPageSpace::From(*space_));
       }
 
       page_state->cached_free_list.Clear();
@@ -725,7 +760,7 @@ class MutatorThreadSweeper final : private HeapVisitor<MutatorThreadSweeper> {
     } else {
       if (space_) {
         DCHECK_IMPLIES(!result.is_empty, space_ == &page.space());
-        page.ChangeOwner(*space_);
+        page.ChangeOwner(NormalPageSpace::From(*space_));
       }
       auto& target_space = NormalPageSpace::From(page.space());
       target_space.AddPage(&page);

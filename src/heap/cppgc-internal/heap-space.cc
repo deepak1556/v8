@@ -42,8 +42,15 @@ BaseSpace::Pages BaseSpace::RemoveAllPages() {
 }
 
 NormalPageSpace::NormalPageSpace(RawHeap* heap, size_t index,
-                                 bool is_compactable)
-    : BaseSpace(heap, index, PageType::kNormal, is_compactable) {}
+                                 bool is_compactable, size_t cell_size)
+    : BaseSpace(heap, index, PageType::kNormal, is_compactable),
+      cell_size_(cell_size) {
+  // Compaction relies on sliding objects of arbitrary sizes.
+  DCHECK_IMPLIES(is_compactable, !is_size_class());
+  DCHECK_IMPLIES(is_size_class(), cell_size >= kMinSizeClassSize);
+  DCHECK_IMPLIES(is_size_class(), cell_size < kSizeClassCutoff);
+  DCHECK_EQ(0u, cell_size & kAllocationMask);
+}
 
 LargePageSpace::LargePageSpace(RawHeap* heap, size_t index)
     : BaseSpace(heap, index, PageType::kLarge, false /* is_compactable */) {}

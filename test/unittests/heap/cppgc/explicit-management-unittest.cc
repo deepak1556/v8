@@ -44,6 +44,11 @@ class DynamicallySized final : public GarbageCollected<DynamicallySized> {
   void Trace(Visitor*) const {}
 };
 
+// Additional bytes that force a `DynamicallySized` object into the space for
+// objects of mixed sizes. Only objects in such spaces can be resized. Objects
+// in size-class spaces occupy exactly one cell.
+constexpr size_t kMixedSpaceBytes = kSizeClassCutoff;
+
 }  // namespace
 
 TEST_F(ExplicitManagementTest, FreeRegularObjectToLAB) {
@@ -116,17 +121,20 @@ TEST_F(ExplicitManagementTest, FreeBailsOutDuringGC) {
 }
 
 TEST_F(ExplicitManagementTest, GrowAtLAB) {
-  auto* o =
-      MakeGarbageCollected<DynamicallySized>(GetHeap()->GetAllocationHandle());
+  auto* o = MakeGarbageCollected<DynamicallySized>(
+      GetHeap()->GetAllocationHandle(), AdditionalBytes(kMixedSpaceBytes));
   auto& header = HeapObjectHeader::FromObject(o);
   ASSERT_TRUE(!header.IsLargeObject());
-  constexpr size_t size_of_o = sizeof(DynamicallySized);
+  ASSERT_FALSE(NormalPage::From(BasePage::FromPayload(o))->is_size_class());
+  constexpr size_t size_of_o = sizeof(DynamicallySized) + kMixedSpaceBytes;
   constexpr size_t kFirstDelta = 8;
-  EXPECT_TRUE(subtle::Resize(*o, AdditionalBytes(kFirstDelta)));
+  EXPECT_TRUE(
+      subtle::Resize(*o, AdditionalBytes(kMixedSpaceBytes + kFirstDelta)));
   EXPECT_EQ(RoundUp<kAllocationGranularity>(size_of_o + kFirstDelta),
             header.ObjectSize());
   constexpr size_t kSecondDelta = 9;
-  EXPECT_TRUE(subtle::Resize(*o, AdditionalBytes(kSecondDelta)));
+  EXPECT_TRUE(
+      subtle::Resize(*o, AdditionalBytes(kMixedSpaceBytes + kSecondDelta)));
   EXPECT_EQ(RoundUp<kAllocationGranularity>(size_of_o + kSecondDelta),
             header.ObjectSize());
   // Second round didn't actually grow object because alignment restrictions
@@ -134,9 +142,43 @@ TEST_F(ExplicitManagementTest, GrowAtLAB) {
   EXPECT_EQ(RoundUp<kAllocationGranularity>(size_of_o + kFirstDelta),
             RoundUp<kAllocationGranularity>(size_of_o + kSecondDelta));
   constexpr size_t kThirdDelta = 16;
-  EXPECT_TRUE(subtle::Resize(*o, AdditionalBytes(kThirdDelta)));
+  EXPECT_TRUE(
+      subtle::Resize(*o, AdditionalBytes(kMixedSpaceBytes + kThirdDelta)));
   EXPECT_EQ(RoundUp<kAllocationGranularity>(size_of_o + kThirdDelta),
             header.ObjectSize());
+}
+
+TEST_F(ExplicitManagementTest, ResizeOnSizeClassPage) {
+  constexpr size_t kAdditionalBytes = 4 * kAllocationGranularity;
+  auto* o = MakeGarbageCollected<DynamicallySized>(
+      GetHeap()->GetAllocationHandle(), AdditionalBytes(kAdditionalBytes));
+  auto& header = HeapObjectHeader::FromObject(o);
+  const auto* page = NormalPage::From(BasePage::FromPayload(o));
+  ASSERT_TRUE(page->is_size_class());
+  const auto& space = NormalPageSpace::From(page->space());
+  const size_t allocated_size = header.AllocatedSize();
+  EXPECT_EQ(page->cell_size(), allocated_size);
+  // The object is directly followed by the LAB. Still, growing is not possible
+  // as objects occupy exactly one cell.
+  ASSERT_EQ(space.linear_allocation_buffer().start(), header.ObjectEnd());
+  const size_t lab_size = space.linear_allocation_buffer().size();
+  EXPECT_FALSE(subtle::Resize(
+      *o, AdditionalBytes(kAdditionalBytes + kAllocationGranularity)));
+  EXPECT_EQ(allocated_size, header.AllocatedSize());
+  EXPECT_EQ(lab_size, space.linear_allocation_buffer().size());
+  // Same size succeeds.
+  EXPECT_TRUE(subtle::Resize(*o, AdditionalBytes(kAdditionalBytes)));
+  EXPECT_EQ(allocated_size, header.AllocatedSize());
+  // Shrinking succeeds without actually changing the object.
+  EXPECT_TRUE(subtle::Resize(*o, AdditionalBytes(0)));
+  EXPECT_EQ(allocated_size, header.AllocatedSize());
+  EXPECT_EQ(lab_size, space.linear_allocation_buffer().size());
+  ResetLinearAllocationBuffers();
+  EXPECT_TRUE(subtle::Resize(*o, AdditionalBytes(0)));
+  EXPECT_EQ(allocated_size, header.AllocatedSize());
+  EXPECT_FALSE(subtle::Resize(
+      *o, AdditionalBytes(kAdditionalBytes + kAllocationGranularity)));
+  EXPECT_EQ(allocated_size, header.AllocatedSize());
 }
 
 TEST_F(ExplicitManagementTest, GrowPastLargeObjectThreshold) {
@@ -148,30 +190,32 @@ TEST_F(ExplicitManagementTest, GrowPastLargeObjectThreshold) {
 }
 
 TEST_F(ExplicitManagementTest, GrowShrinkAtLAB) {
-  auto* o =
-      MakeGarbageCollected<DynamicallySized>(GetHeap()->GetAllocationHandle());
+  auto* o = MakeGarbageCollected<DynamicallySized>(
+      GetHeap()->GetAllocationHandle(), AdditionalBytes(kMixedSpaceBytes));
   auto& header = HeapObjectHeader::FromObject(o);
   ASSERT_TRUE(!header.IsLargeObject());
-  constexpr size_t size_of_o = sizeof(DynamicallySized);
+  ASSERT_FALSE(NormalPage::From(BasePage::FromPayload(o))->is_size_class());
+  constexpr size_t size_of_o = sizeof(DynamicallySized) + kMixedSpaceBytes;
   constexpr size_t kDelta = 27;
-  EXPECT_TRUE(subtle::Resize(*o, AdditionalBytes(kDelta)));
+  EXPECT_TRUE(subtle::Resize(*o, AdditionalBytes(kMixedSpaceBytes + kDelta)));
   EXPECT_EQ(RoundUp<kAllocationGranularity>(size_of_o + kDelta),
             header.ObjectSize());
-  EXPECT_TRUE(subtle::Resize(*o, AdditionalBytes(0)));
+  EXPECT_TRUE(subtle::Resize(*o, AdditionalBytes(kMixedSpaceBytes)));
   EXPECT_EQ(RoundUp<kAllocationGranularity>(size_of_o), header.ObjectSize());
 }
 
 TEST_F(ExplicitManagementTest, ShrinkFreeList) {
   auto* o = MakeGarbageCollected<DynamicallySized>(
       GetHeap()->GetAllocationHandle(),
-      AdditionalBytes(ObjectAllocator::kSmallestSpaceSize));
+      AdditionalBytes(kMixedSpaceBytes + ObjectAllocator::kSmallestSpaceSize));
   const auto& space = NormalPageSpace::From(BasePage::FromPayload(o)->space());
+  ASSERT_FALSE(space.is_size_class());
   // Force returning to free list by removing the LAB.
   ResetLinearAllocationBuffers();
   auto& header = HeapObjectHeader::FromObject(o);
   ASSERT_TRUE(!header.IsLargeObject());
-  constexpr size_t size_of_o = sizeof(DynamicallySized);
-  EXPECT_TRUE(subtle::Resize(*o, AdditionalBytes(0)));
+  constexpr size_t size_of_o = sizeof(DynamicallySized) + kMixedSpaceBytes;
+  EXPECT_TRUE(subtle::Resize(*o, AdditionalBytes(kMixedSpaceBytes)));
   EXPECT_EQ(RoundUp<kAllocationGranularity>(size_of_o), header.ObjectSize());
   EXPECT_TRUE(space.free_list().ContainsForTesting(
       {header.ObjectEnd(), ObjectAllocator::kSmallestSpaceSize}));
@@ -180,14 +224,16 @@ TEST_F(ExplicitManagementTest, ShrinkFreeList) {
 TEST_F(ExplicitManagementTest, ShrinkFreeListBailoutAvoidFragmentation) {
   auto* o = MakeGarbageCollected<DynamicallySized>(
       GetHeap()->GetAllocationHandle(),
-      AdditionalBytes(ObjectAllocator::kSmallestSpaceSize - 1));
+      AdditionalBytes(kMixedSpaceBytes + ObjectAllocator::kSmallestSpaceSize -
+                      1));
   const auto& space = NormalPageSpace::From(BasePage::FromPayload(o)->space());
+  ASSERT_FALSE(space.is_size_class());
   // Force returning to free list by removing the LAB.
   ResetLinearAllocationBuffers();
   auto& header = HeapObjectHeader::FromObject(o);
   ASSERT_TRUE(!header.IsLargeObject());
-  constexpr size_t size_of_o = sizeof(DynamicallySized);
-  EXPECT_TRUE(subtle::Resize(*o, AdditionalBytes(0)));
+  constexpr size_t size_of_o = sizeof(DynamicallySized) + kMixedSpaceBytes;
+  EXPECT_TRUE(subtle::Resize(*o, AdditionalBytes(kMixedSpaceBytes)));
   EXPECT_EQ(RoundUp<kAllocationGranularity>(
                 size_of_o + ObjectAllocator::kSmallestSpaceSize - 1),
             header.ObjectSize());

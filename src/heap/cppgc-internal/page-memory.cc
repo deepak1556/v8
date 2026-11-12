@@ -113,12 +113,13 @@ void NormalPageMemoryPool::Add(PageMemoryRegion* pmr) {
     void* base = pmr->region().base();
 #if CPPGC_SHOULD_ZAP_MEMORY
     const size_t size = pmr->has_decommitted_memory()
-                            ? NormalPage::PageHeaderSize()
+                            ? NormalPage::MaxPageHeaderSize()
                             : pmr->region().size();
 #else
     // In release builds, swept page payloads are already zero-initialized by
-    // SetMemoryInaccessible(). Only the page header needs to be zeroed.
-    const size_t size = NormalPage::PageHeaderSize();
+    // SetMemoryInaccessible(). Only the page header needs to be zeroed. The
+    // layout of the page is not known here, so the largest header is assumed.
+    const size_t size = NormalPage::MaxPageHeaderSize();
 #endif
     AsanUnpoisonScope unpoison_for_memset(base, size);
     std::memset(base, 0, size);
