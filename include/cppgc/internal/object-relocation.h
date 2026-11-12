@@ -124,9 +124,23 @@ struct GenericObjectRelocationDescriptorHolder {
   };
 };
 
+#if defined(__has_feature)
+#if __has_feature(ptrauth_calls)
+#define CPPGC_HAS_PTRAUTH_CALLS 1
+#endif
+#endif
+#ifndef CPPGC_HAS_PTRAUTH_CALLS
+#define CPPGC_HAS_PTRAUTH_CALLS 0
+#endif
+
 template <typename T, typename = void>
 struct ObjectRelocationTrait {
   using DecayedT = std::remove_cv_t<T>;
+  // On Apple arm64e (`ptrauth_calls`), polymorphic vtable pointers are signed
+  // with address diversity (`&obj->vptr`), so raw `memcpy` is only valid for
+  // non-polymorphic types unless a custom rebasing hook re-signs `vptr`.
+  static constexpr bool kPtrAuthAllowsBitwiseRelocation =
+      !CPPGC_HAS_PTRAUTH_CALLS || !std::is_polymorphic_v<DecayedT>;
   static constexpr bool kIsOptedIn =
       IsExactRelocationOwnerMatch<DecayedT>::value;
   static constexpr bool kIsDisallowed =
@@ -137,7 +151,8 @@ struct ObjectRelocationTrait {
   static constexpr bool kIsGenericRelocatable =
       IsGarbageCollectedType<DecayedT>::value &&
       !IsGarbageCollectedMixinType<DecayedT>::value &&
-      !HasRelocationOwnerMarker<DecayedT>::value && !kIsDisallowed;
+      !HasRelocationOwnerMarker<DecayedT>::value &&
+      kPtrAuthAllowsBitwiseRelocation && !kIsDisallowed;
   static constexpr bool kIsRelocatable = kIsOptedIn || kIsGenericRelocatable;
   static constexpr bool kPreventGCInfoFolding =
       HasRelocationOwnerMarker<DecayedT>::value;
