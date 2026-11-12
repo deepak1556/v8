@@ -225,11 +225,15 @@ class MakeGarbageCollectedTraitBase
         kWantedAlignment <= internal::api_constants::kMaxSupportedAlignment,
         "Requested alignment larger than alignof(std::max_align_t) bytes. "
         "Please file a bug to possibly get this restriction lifted.");
-    return AllocationDispatcher<
+    using GCInfoType = std::conditional_t<
+        internal::ObjectRelocationTrait<T>::kIsRelocatable ||
+            internal::ObjectRelocationTrait<T>::kPreventGCInfoFolding,
+        T,
         typename internal::GCInfoFolding<
-            T, typename T::ParentMostGarbageCollectedType>::ResultType,
-        typename SpaceTrait<T>::Space, kWantedAlignment,
-        kMayContainMixins>::Invoke(handle, size);
+            T, typename T::ParentMostGarbageCollectedType>::ResultType>;
+    return AllocationDispatcher<GCInfoType, typename SpaceTrait<T>::Space,
+                                kWantedAlignment,
+                                kMayContainMixins>::Invoke(handle, size);
   }
 
   /**

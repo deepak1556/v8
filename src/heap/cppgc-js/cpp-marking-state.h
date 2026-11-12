@@ -7,6 +7,8 @@
 
 #include <memory>
 
+#include "include/cppgc/internal/object-relocation.h"
+#include "src/heap/cppgc-internal/heap-base.h"
 #include "src/heap/cppgc-internal/marking-state.h"
 #include "src/heap/cppgc-internal/marking-worklists.h"
 #include "src/heap/cppgc-js/cpp-heap.h"
@@ -35,6 +37,7 @@ class CppMarkingState final {
   void Publish() { marking_state_.Publish(); }
 
   V8_INLINE void MarkAndPush(void* instance) {
+    marking_state_.heap().object_compactor().ObserveForeignTarget(instance);
     marking_state_.MarkAndPush(
         cppgc::internal::HeapObjectHeader::FromObject(instance));
   }

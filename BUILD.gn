@@ -8261,6 +8261,7 @@ v8_header_set("cppgc_headers") {
     "include/cppgc/internal/gc-info.h",
     "include/cppgc/internal/member-storage.h",
     "include/cppgc/internal/name-trait.h",
+    "include/cppgc/internal/object-relocation.h",
     "include/cppgc/internal/persistent-node.h",
     "include/cppgc/internal/pointer-policies.h",
     "include/cppgc/internal/write-barrier.h",
@@ -8270,6 +8271,7 @@ v8_header_set("cppgc_headers") {
     "include/cppgc/name-provider.h",
     "include/cppgc/object-size-trait.h",
     "include/cppgc/persistent.h",
+    "include/cppgc/pinned-borrow.h",
     "include/cppgc/platform.h",
     "include/cppgc/prefinalizer.h",
     "include/cppgc/process-heap-statistics.h",
@@ -8362,6 +8364,8 @@ v8_cluster_source_set("cppgc_base") {
     "src/heap/cppgc-internal/name-trait.cc",
     "src/heap/cppgc-internal/object-allocator.cc",
     "src/heap/cppgc-internal/object-allocator.h",
+    "src/heap/cppgc-internal/object-compactor.cc",
+    "src/heap/cppgc-internal/object-compactor.h",
     "src/heap/cppgc-internal/object-poisoner.h",
     "src/heap/cppgc-internal/object-size-trait.cc",
     "src/heap/cppgc-internal/object-start-bitmap.h",
@@ -8421,6 +8425,7 @@ v8_cluster_source_set("cppgc_base") {
 
   public_deps = [
     ":cppgc_headers",
+    ":v8_abseil",
     ":v8_heap_base",
     ":v8_libbase",
     ":v8_libplatform",

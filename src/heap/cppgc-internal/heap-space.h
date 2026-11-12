@@ -102,7 +102,11 @@ class V8_EXPORT_PRIVATE NormalPageSpace final : public BaseSpace {
   // a size-class space. A `cell_size` of 0 denotes a space that holds objects
   // of mixed sizes.
   NormalPageSpace(RawHeap* heap, size_t index, bool is_compactable,
-                  size_t cell_size = 0);
+                  size_t cell_size = 0, bool supports_object_compaction = true);
+
+  bool supports_object_compaction() const {
+    return supports_object_compaction_;
+  }
 
   LinearAllocationBuffer& linear_allocation_buffer() { return current_lab_; }
   const LinearAllocationBuffer& linear_allocation_buffer() const {
@@ -122,6 +126,7 @@ class V8_EXPORT_PRIVATE NormalPageSpace final : public BaseSpace {
   LinearAllocationBuffer current_lab_;
   FreeList free_list_;
   const size_t cell_size_;
+  const bool supports_object_compaction_ = true;
 };
 
 class V8_EXPORT_PRIVATE LargePageSpace final : public BaseSpace {

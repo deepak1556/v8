@@ -28,7 +28,8 @@ RawHeap::RawHeap(
   DCHECK_EQ(kNumberOfRegularSpaces, spaces_.size());
   for (size_t j = 0; j < custom_spaces.size(); j++) {
     spaces_.push_back(std::make_unique<NormalPageSpace>(
-        this, kNumberOfRegularSpaces + j, custom_spaces[j]->IsCompactable()));
+        this, kNumberOfRegularSpaces + j, custom_spaces[j]->IsCompactable(),
+        /*cell_size=*/0, custom_spaces[j]->SupportsObjectCompaction()));
   }
 }
 

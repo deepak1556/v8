@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
+#include <memory>
 
 #include "include/cppgc/internal/base-page-handle.h"
 #include "src/base/hashing.h"
@@ -14,6 +16,7 @@
 #include "src/base/macros.h"
 #include "src/heap/base/active-system-pages.h"
 #include "src/heap/base/basic-slot-set.h"
+#include "src/heap/base/typed-slot-set.h"
 #include "src/heap/cppgc-internal/globals.h"
 #include "src/heap/cppgc-internal/heap-config.h"
 #include "src/heap/cppgc-internal/heap-object-header.h"
@@ -28,7 +31,23 @@ class NormalPageSpace;
 class LargePageSpace;
 class HeapBase;
 class PageBackend;
-class SlotSet;
+
+class SlotSet : public ::heap::base::BasicSlotSet<kSlotSize> {};
+
+enum class CompactionSlotType : uint8_t {
+  kCompressedMember = 0,
+  kUncompressedMember = 1,
+  kTaggedUncompressedMember = 2,
+  kCleared = 3,
+  kLast = kCleared,
+};
+
+class CompactionTypedSlotSet
+    : public ::heap::base::BasicTypedSlotSet<CompactionSlotType> {
+ public:
+  explicit CompactionTypedSlotSet(uintptr_t page_start)
+      : ::heap::base::BasicTypedSlotSet<CompactionSlotType>(page_start) {}
+};
 
 class V8_EXPORT_PRIVATE BasePage : public BasePageHandle {
  public:
@@ -137,11 +156,17 @@ class V8_EXPORT_PRIVATE BasePage : public BasePageHandle {
     contains_young_objects_ = value;
   }
 
-#if defined(CPPGC_YOUNG_GENERATION)
+  // Shared per-page slot sets used by generational remembered sets during minor
+  // GC and by `ObjectCompactor` during pause-time major-GC compaction.
   V8_INLINE SlotSet* slot_set() const { return slot_set_.get(); }
   V8_INLINE SlotSet& GetOrAllocateSlotSet();
   void ResetSlotSet();
-#endif  // defined(CPPGC_YOUNG_GENERATION)
+
+  V8_INLINE CompactionTypedSlotSet* compaction_typed_slot_set() const {
+    return compaction_typed_slot_set_.get();
+  }
+  V8_INLINE CompactionTypedSlotSet& GetOrAllocateCompactionTypedSlotSet();
+  void ResetCompactionTypedSlotSet() { compaction_typed_slot_set_.reset(); }
 
  protected:
   enum class PageType : uint8_t { kNormal, kLarge };
@@ -155,13 +180,13 @@ class V8_EXPORT_PRIVATE BasePage : public BasePageHandle {
     size_t page_size_ = 0;
   };
   void AllocateSlotSet();
+  void AllocateCompactionTypedSlotSet();
 
   BaseSpace* space_;
   PageType type_;
   bool contains_young_objects_ = false;
-#if defined(CPPGC_YOUNG_GENERATION)
   std::unique_ptr<SlotSet, SlotSetDeleter> slot_set_;
-#endif  // defined(CPPGC_YOUNG_GENERATION)
+  std::unique_ptr<CompactionTypedSlotSet> compaction_typed_slot_set_;
   size_t discarded_memory_ = 0;
   std::atomic<size_t> marked_bytes_{0};
 };
@@ -328,6 +353,44 @@ class V8_EXPORT_PRIVATE NormalPage final : public BasePage {
   }
   bool IsAddressOnCommittedSubPage(const void* address) const;
 
+  void IncrementBorrowPinCount() {
+    const uint32_t prev =
+        active_borrow_pin_count_.fetch_add(1, std::memory_order_relaxed);
+    CHECK_LT(prev, std::numeric_limits<uint32_t>::max());
+  }
+  void DecrementBorrowPinCount() {
+    const uint32_t prev =
+        active_borrow_pin_count_.fetch_sub(1, std::memory_order_relaxed);
+    CHECK_GT(prev, 0u);
+  }
+  uint32_t borrow_pin_count() const {
+    return active_borrow_pin_count_.load(std::memory_order_relaxed);
+  }
+
+  void PinByConservativeStack(uint64_t epoch) {
+    conservative_pin_epoch_.store(epoch, std::memory_order_relaxed);
+  }
+  bool IsPinnedByConservativeStack(uint64_t epoch) const {
+    return conservative_pin_epoch_.load(std::memory_order_relaxed) == epoch;
+  }
+
+  void PinByCrossThreadRoot(uint64_t epoch) {
+    cross_thread_pin_epoch_.store(epoch, std::memory_order_relaxed);
+  }
+  bool IsPinnedByCrossThreadRoot(uint64_t epoch) const {
+    return cross_thread_pin_epoch_.load(std::memory_order_relaxed) == epoch;
+  }
+
+  bool IsPinnedForCompaction(uint64_t epoch) const {
+    return borrow_pin_count() > 0 || IsPinnedByConservativeStack(epoch) ||
+           IsPinnedByCrossThreadRoot(epoch);
+  }
+
+  bool is_evacuation_candidate() const { return is_evacuation_candidate_; }
+  void set_is_evacuation_candidate(bool value) {
+    is_evacuation_candidate_ = value;
+  }
+
  private:
   NormalPage(HeapBase& heap, NormalPageSpace& space);
   ~NormalPage() = default;
@@ -335,6 +398,10 @@ class V8_EXPORT_PRIVATE NormalPage final : public BasePage {
   void SetLayout(size_t cell_size);
 
   size_t allocated_bytes_at_last_gc_ = 0;
+  std::atomic<uint32_t> active_borrow_pin_count_{0};
+  std::atomic<uint64_t> conservative_pin_epoch_{0};
+  std::atomic<uint64_t> cross_thread_pin_epoch_{0};
+  bool is_evacuation_candidate_ = false;
   uint32_t payload_size_ = 0;
   // The following fields are only used for size-class pages.
   uint32_t cell_size_reciprocal_ = 0;
@@ -505,12 +572,15 @@ const HeapObjectHeader& BasePage::ObjectHeaderFromInnerAddressConcurrent(
   return *header;
 }
 
-#if defined(CPPGC_YOUNG_GENERATION)
 SlotSet& BasePage::GetOrAllocateSlotSet() {
   if (!slot_set_) AllocateSlotSet();
   return *slot_set_;
 }
-#endif  // defined(CPPGC_YOUNG_GENERATION)
+
+CompactionTypedSlotSet& BasePage::GetOrAllocateCompactionTypedSlotSet() {
+  if (!compaction_typed_slot_set_) AllocateCompactionTypedSlotSet();
+  return *compaction_typed_slot_set_;
+}
 
 // static
 constexpr inline size_t NormalPage::PageHeaderSizeFor(size_t cell_size) {

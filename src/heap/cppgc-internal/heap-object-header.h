@@ -16,6 +16,7 @@
 #include "src/base/bit-field.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
+#include "src/base/sanitizer/asan.h"
 #include "src/heap/cppgc-internal/gc-info-table.h"
 #include "src/heap/cppgc-internal/globals.h"
 
@@ -104,6 +105,15 @@ class HeapObjectHeader {
   template <AccessMode = AccessMode::kNonAtomic>
   bool IsFree() const;
 
+  // Forwarding pointer support for pause-time object compaction, mirroring
+  // V8's `MapWord::FromForwardingAddress`. While forwarded, `AllocatedSize()`
+  // and the page's `ObjectStartBitmap` / cell layout remain intact so interior
+  // pointers resolve `ObjectStart()` + offset in O(1), while the destination
+  // payload address is stored in the first word of the retired source payload.
+  inline bool IsForwarded() const;
+  inline void SetForwardedAddress(Address destination_payload);
+  inline Address GetForwardedAddress() const;
+
   inline bool IsFinalizable() const;
   void Finalize();
 
@@ -128,8 +138,8 @@ class HeapObjectHeader {
 
   // Used in |encoded_high_|.
   using GCInfoIndexField = v8::base::BitField16<GCInfoIndex, 0, 14>;
-  using UnusedField1 = GCInfoIndexField::Next<bool, 1>;
-  using FullyConstructedField = UnusedField1::Next<bool, 1>;
+  using ForwardedField = GCInfoIndexField::Next<bool, 1>;
+  using FullyConstructedField = ForwardedField::Next<bool, 1>;
   // Used in |encoded_low_|.
   using MarkBitField = v8::base::BitField16<bool, 0, 1>;
   using SizeField =
@@ -319,6 +329,28 @@ bool HeapObjectHeader::IsYoung() const {
 template <AccessMode mode>
 bool HeapObjectHeader::IsFree() const {
   return GetGCInfoIndex<mode>() == kFreeListGCInfoIndex;
+}
+
+bool HeapObjectHeader::IsForwarded() const {
+  const uint16_t encoded =
+      LoadEncoded<AccessMode::kNonAtomic, EncodedHalf::kHigh,
+                  std::memory_order_relaxed>();
+  return ForwardedField::decode(encoded);
+}
+
+void HeapObjectHeader::SetForwardedAddress(Address destination_payload) {
+  DCHECK(!IsFree());
+  DCHECK_GE(ObjectSize(), sizeof(Address));
+  ASAN_UNPOISON_MEMORY_REGION(ObjectStart(), sizeof(Address));
+  *reinterpret_cast<Address*>(ObjectStart()) = destination_payload;
+  StoreEncoded<AccessMode::kNonAtomic, EncodedHalf::kHigh,
+               std::memory_order_relaxed>(ForwardedField::encode(true),
+                                          ForwardedField::kMask);
+}
+
+Address HeapObjectHeader::GetForwardedAddress() const {
+  DCHECK(IsForwarded());
+  return *reinterpret_cast<const Address*>(ObjectStart());
 }
 
 bool HeapObjectHeader::IsFinalizable() const {

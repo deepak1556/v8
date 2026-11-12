@@ -12,6 +12,16 @@
 namespace cppgc::internal {
 
 // static
+GCInfoIndex EnsureGCInfoIndexTrait::EnsureGCInfoIndexWithRelocation(
+    std::atomic<GCInfoIndex>& registered_index, TraceCallback trace_callback,
+    FinalizationCallback finalization_callback, NameCallback name_callback,
+    const ObjectRelocationDescriptor* relocation_descriptor) {
+  return GlobalGCInfoTable::GetMutable().RegisterNewGCInfo(
+      registered_index, GCInfo(finalization_callback, trace_callback,
+                               name_callback, relocation_descriptor));
+}
+
+// static
 GCInfoIndex EnsureGCInfoIndexTrait::EnsureGCInfoIndex(
     std::atomic<GCInfoIndex>& registered_index, TraceCallback trace_callback,
     FinalizationCallback finalization_callback, NameCallback name_callback) {

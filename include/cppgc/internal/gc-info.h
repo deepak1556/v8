@@ -12,6 +12,7 @@
 #include "cppgc/internal/finalizer-trait.h"
 #include "cppgc/internal/logging.h"
 #include "cppgc/internal/name-trait.h"
+#include "cppgc/internal/object-relocation.h"
 #include "cppgc/trace-trait.h"
 #include "v8config.h"  // NOLINT(build/include_directory)
 
@@ -23,13 +24,14 @@ static constexpr GCInfoIndex kMinGCInfoIndex = 1;
 
 struct GCInfo final {
   constexpr GCInfo(FinalizationCallback finalize, TraceCallback trace,
-                   NameCallback name)
-      : finalize(finalize), trace(trace), name(name) {}
+                   NameCallback name,
+                   const ObjectRelocationDescriptor* relocation = nullptr)
+      : finalize(finalize), trace(trace), name(name), relocation(relocation) {}
 
   FinalizationCallback finalize;
   TraceCallback trace;
   NameCallback name;
-  size_t padding = 0;
+  const ObjectRelocationDescriptor* relocation = nullptr;
 };
 
 inline HeapObjectName GetHiddenName(
@@ -86,6 +88,13 @@ struct V8_EXPORT EnsureGCInfoIndexTrait final {
   template <typename T>
   V8_INLINE static GCInfoIndex EnsureIndex(
       std::atomic<GCInfoIndex>& registered_index) {
+    if constexpr (ObjectRelocationTrait<T>::kIsRelocatable) {
+      return EnsureGCInfoIndexWithRelocation(
+          registered_index, TraceTrait<T>::Trace, FinalizerTrait<T>::kCallback,
+          NameTrait<T>::HasNonHiddenName() ? NameTrait<T>::GetName
+                                           : GetHiddenName,
+          ObjectRelocationTrait<T>::GetDescriptor());
+    }
     return EnsureGCInfoIndexTraitDispatch<T>{}(registered_index);
   }
 
@@ -94,6 +103,9 @@ struct V8_EXPORT EnsureGCInfoIndexTrait final {
             bool = NameTrait<T>::HasNonHiddenName()>
   struct EnsureGCInfoIndexTraitDispatch;
 
+  static GCInfoIndex V8_PRESERVE_MOST EnsureGCInfoIndexWithRelocation(
+      std::atomic<GCInfoIndex>&, TraceCallback, FinalizationCallback,
+      NameCallback, const ObjectRelocationDescriptor*);
   static GCInfoIndex V8_PRESERVE_MOST
   EnsureGCInfoIndex(std::atomic<GCInfoIndex>&, TraceCallback,
                     FinalizationCallback, NameCallback);
@@ -191,6 +203,13 @@ struct GCInfoFolding final {
   static constexpr bool kWantsDetailedObjectNames = false;
 #endif  // !CPPGC_SUPPORTS_OBJECT_NAMES
 
+  static constexpr bool kPreventRelocationFolding =
+      ObjectRelocationTrait<T>::kIsOptedIn ||
+      ObjectRelocationTrait<T>::kPreventGCInfoFolding ||
+      ObjectRelocationTrait<ParentMostGarbageCollectedType>::kIsOptedIn ||
+      ObjectRelocationTrait<
+          ParentMostGarbageCollectedType>::kPreventGCInfoFolding;
+
   // Always true. Forces the compiler to resolve callbacks which ensures that
   // both modes don't break without requiring compiling a separate
   // configuration. Only a single GCInfo (for `ResultType` below) will actually
@@ -200,7 +219,7 @@ struct GCInfoFolding final {
     if constexpr ((kHasVirtualDestructorAtBase ||
                    kBothTypesAreTriviallyDestructible ||
                    kHasCustomFinalizerDispatchAtBase) &&
-                  !kWantsDetailedObjectNames) {
+                  !kWantsDetailedObjectNames && !kPreventRelocationFolding) {
       GCInfoTrait<T>::CheckCallbacksAreDefined();
       GCInfoTrait<ParentMostGarbageCollectedType>::CheckCallbacksAreDefined();
       return true;
@@ -218,7 +237,8 @@ struct GCInfoFolding final {
 template <typename T>
 const GCInfo GCInfoTrait<T>::gc_info CPPGC_GC_INFO_SECTION = GCInfo(
     FinalizerTrait<T>::kCallback, TraceTrait<T>::Trace,
-    NameTrait<T>::HasNonHiddenName() ? NameTrait<T>::GetName : GetHiddenName);
+    NameTrait<T>::HasNonHiddenName() ? NameTrait<T>::GetName : GetHiddenName,
+    ObjectRelocationTrait<T>::GetDescriptor());
 #endif  // defined(CPPGC_ENABLE_OBJECT_SECTION_GCINFO)
 
 }  // namespace cppgc::internal

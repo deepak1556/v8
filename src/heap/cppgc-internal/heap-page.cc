@@ -197,7 +197,6 @@ const HeapObjectHeader* BasePage::TryObjectHeaderFromInnerAddress(
   }
 }
 
-#if defined(CPPGC_YOUNG_GENERATION)
 void BasePage::AllocateSlotSet() {
   DCHECK_NULL(slot_set_);
   slot_set_ = decltype(slot_set_)(
@@ -206,23 +205,24 @@ void BasePage::AllocateSlotSet() {
       SlotSetDeleter{AllocatedSize()});
 }
 
+void BasePage::AllocateCompactionTypedSlotSet() {
+  DCHECK_NULL(compaction_typed_slot_set_);
+  compaction_typed_slot_set_ = std::make_unique<CompactionTypedSlotSet>(
+      reinterpret_cast<uintptr_t>(this));
+}
+
 void BasePage::SlotSetDeleter::operator()(SlotSet* slot_set) const {
   DCHECK_NOT_NULL(slot_set);
   SlotSet::Delete(slot_set);
 }
 
 void BasePage::ResetSlotSet() { slot_set_.reset(); }
-#endif  // defined(CPPGC_YOUNG_GENERATION)
 
 BasePage::BasePage(HeapBase& heap, BaseSpace& space, PageType type)
     : BasePageHandle(heap),
       space_(&space),
-      type_(type)
-#if defined(CPPGC_YOUNG_GENERATION)
-      ,
-      slot_set_(nullptr, SlotSetDeleter{})
-#endif  // defined(CPPGC_YOUNG_GENERATION)
-{
+      type_(type),
+      slot_set_(nullptr, SlotSetDeleter{}) {
   DCHECK_EQ(0u, reinterpret_cast<uintptr_t>(this) & kPageOffsetMask);
   DCHECK_EQ(&heap.raw_heap(), space_->raw_heap());
 }

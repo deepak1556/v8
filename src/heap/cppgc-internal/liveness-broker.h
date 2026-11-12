@@ -13,7 +13,7 @@ namespace internal {
 
 class V8_EXPORT_PRIVATE LivenessBrokerFactory {
  public:
-  static LivenessBroker Create();
+  static LivenessBroker Create(bool pins_raw_queries = false);
 };
 
 }  // namespace internal

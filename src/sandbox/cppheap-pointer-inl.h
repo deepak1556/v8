@@ -8,6 +8,7 @@
 #include "src/sandbox/cppheap-pointer.h"
 // Include the non-inl header before the rest of the headers.
 
+#include "include/cppgc/internal/object-relocation.h"
 #include "include/v8-internal.h"
 #include "src/base/atomic-utils.h"
 #include "src/objects/slots-inl.h"
@@ -56,6 +57,10 @@ V8_INLINE Address ReadCppHeapPointerField(Address field_address,
 V8_INLINE void WriteLazilyInitializedCppHeapPointerField(
     Address field_address, IsolateForPointerCompression isolate, Address value,
     CppHeapPointerTag tag) {
+  if (value != kNullAddress) {
+    cppgc::internal::ObjectPinningApi::ObserveForeignTargetWrite(
+        reinterpret_cast<const void*>(value));
+  }
   CppHeapPointerSlot slot(field_address);
 #ifdef V8_COMPRESS_POINTERS
   DCHECK_NE(tag, CppHeapPointerTag::kNullTag);

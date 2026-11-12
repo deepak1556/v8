@@ -155,19 +155,22 @@ bool EmbedderDataSlot::ToAlignedPointer(
 
 bool EmbedderDataSlot::ToGenericAlignedPointer(
     IsolateForPointerCompression isolate, void** out_pointer) const {
-  return ToAlignedPointer(
-      isolate, out_pointer, {kFirstEmbedderDataTag, kLastEmbedderDataTag});
+  return ToAlignedPointer(isolate, out_pointer,
+                          {kFirstEmbedderDataTag, kLastEmbedderDataTag});
 }
 
 bool EmbedderDataSlot::DeprecatedToAlignedPointer(
     IsolateForPointerCompression isolate, void** out_pointer) const {
-  return ToAlignedPointer(
-      isolate, out_pointer, {kFirstEmbedderDataTag, kLastEmbedderDataTag});
+  return ToAlignedPointer(isolate, out_pointer,
+                          {kFirstEmbedderDataTag, kLastEmbedderDataTag});
 }
 
 bool EmbedderDataSlot::store_aligned_pointer(Isolate* isolate,
                                              Tagged<HeapObject> host, void* ptr,
                                              CppHeapPointerTag tag) {
+  if (ptr != nullptr) {
+    cppgc::internal::ObjectPinningApi::ObserveForeignTargetWrite(ptr);
+  }
   Address value = reinterpret_cast<Address>(ptr);
 #ifdef V8_COMPRESS_POINTERS
   CppHeapPointerSlot slot(address() + kCppHeapPointerOffset);
@@ -207,13 +210,15 @@ bool EmbedderDataSlot::store_aligned_pointer(Isolate* isolate,
 
 // static
 template <typename T>
-  requires std::is_same_v<EmbedderDataArray, T> ||
-           std::is_same_v<JSObject, T>
-bool EmbedderDataSlot::store_aligned_pointer(
-    Isolate* isolate, DirectHandle<T> host, int entry_or_embedder_field_index,
-    void* ptr, ExternalPointerTag tag) {
+  requires std::is_same_v<EmbedderDataArray, T> || std::is_same_v<JSObject, T>
+bool EmbedderDataSlot::store_aligned_pointer(Isolate* isolate,
+                                             DirectHandle<T> host,
+                                             int entry_or_embedder_field_index,
+                                             void* ptr,
+                                             ExternalPointerTag tag) {
   EmbedderDataSlotWrapper* wrapper = nullptr;
   if (ptr != nullptr) {
+    cppgc::internal::ObjectPinningApi::RecordUntracedMemberTarget(ptr);
     v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate);
     cppgc::AllocationHandle& alloc_handle =
         v8_isolate->GetCppHeap()->GetAllocationHandle();

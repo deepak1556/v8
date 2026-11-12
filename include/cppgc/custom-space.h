@@ -26,6 +26,7 @@ class CustomSpaceBase {
   virtual ~CustomSpaceBase() = default;
   virtual CustomSpaceIndex GetCustomSpaceIndex() const = 0;
   virtual bool IsCompactable() const = 0;
+  virtual bool SupportsObjectCompaction() const { return !IsCompactable(); }
 };
 
 /**
@@ -53,12 +54,17 @@ class CustomSpace : public CustomSpaceBase {
    * recording.
    */
   static constexpr bool kSupportsCompaction = false;
+  static constexpr bool kSupportsObjectCompaction = true;
 
   CustomSpaceIndex GetCustomSpaceIndex() const final {
     return ConcreteCustomSpace::kSpaceIndex;
   }
   bool IsCompactable() const final {
     return ConcreteCustomSpace::kSupportsCompaction;
+  }
+  bool SupportsObjectCompaction() const final {
+    return !ConcreteCustomSpace::kSupportsCompaction &&
+           ConcreteCustomSpace::kSupportsObjectCompaction;
   }
 };
 

@@ -10,6 +10,7 @@
 #include <memory>
 
 #include "cppgc/garbage-collected.h"
+#include "cppgc/internal/object-relocation.h"
 #include "cppgc/macros.h"
 #include "cppgc/name-provider.h"
 #include "v8-local-handle.h"  // NOLINT(build/include_directory)
@@ -43,6 +44,7 @@ class MicrotaskQueue;
 class V8_EXPORT MicrotaskQueue : public cppgc::GarbageCollected<MicrotaskQueue>,
                                  public cppgc::NameProvider {
  public:
+  CPPGC_DISALLOW_OBJECT_RELOCATION();
   /**
    * Creates an empty MicrotaskQueue instance.
    */

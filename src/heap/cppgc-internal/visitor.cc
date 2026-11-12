@@ -79,12 +79,14 @@ void ConservativeTracingVisitor::TryTracePointerConservatively(
   if (V8_LIKELY(!CagedHeapBase::IsWithinCage(address))) return;
 #endif  // defined(CPPGC_CAGED_HEAP)
 
-  const BasePage* page =
-      reinterpret_cast<const BasePage*>(page_backend_.Lookup(address));
+  BasePage* page = reinterpret_cast<BasePage*>(page_backend_.Lookup(address));
   if (!page) {
     return;
   }
   DCHECK_EQ(&heap_, &page->heap());
+  // Pin every normal page hit by conservative native-pointer scanning before
+  // any object-header or marking shortcuts.
+  heap_.object_compactor().RecordConservativePageHit(page);
   auto* header = const_cast<HeapObjectHeader*>(
       page->TryObjectHeaderFromInnerAddress(address));
   if (!header) {

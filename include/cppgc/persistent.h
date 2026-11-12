@@ -27,9 +27,11 @@ class PersistentBase {
 
   const void* GetValue() const { return raw_; }
   void SetValue(const void* value) { raw_ = value; }
+  void SetValueFromGC(const void* value) const { raw_ = value; }
 
   PersistentNode* GetNode() const { return node_; }
   void SetNode(PersistentNode* node) { node_ = node; }
+  void SetNodeFromGC(PersistentNode* node) const { node_ = node; }
 
   // Performs a shallow clear which assumes that internal persistent nodes are
   // destroyed elsewhere.
@@ -258,6 +260,18 @@ class BasicPersistent final : public PersistentBase,
       WeaknessPolicy::GetPersistentRegion(GetValue()).FreeNode(GetNode());
       PersistentBase::ClearFromGC();
     }
+  }
+
+  void SetFromGC(T* ptr) const {
+    if (IsValid()) {
+      if (ptr && ptr != kSentinelPointer) {
+        SetValueFromGC(ptr);
+        return;
+      }
+      WeaknessPolicy::GetPersistentRegion(GetValue()).FreeNode(GetNode());
+      SetNodeFromGC(nullptr);
+    }
+    SetValueFromGC(ptr);
   }
 
   // Set Get() for details.

@@ -994,4 +994,97 @@ TEST_F(UnifiedHeapTest, TriggerGCWithNoIncrementalMarking) {
          "even without incremental marking";
 }
 
+namespace {
+
+class UnifiedRelocatableWrappable final
+    : public cppgc::GarbageCollected<UnifiedRelocatableWrappable> {
+ public:
+  CPPGC_DECLARE_EXACT_RELOCATABLE_TYPE(UnifiedRelocatableWrappable);
+
+  explicit UnifiedRelocatableWrappable(uint64_t id) : id_(id) {}
+  UnifiedRelocatableWrappable(UnifiedRelocatableWrappable&& other) noexcept
+      : id_(other.id_) {
+    other.id_ = 0xBAD0BAD0ULL;
+  }
+
+  void Trace(cppgc::Visitor*) const {}
+  uint64_t id() const { return id_; }
+
+ private:
+  uint64_t id_;
+};
+
+const cppgc::internal::ObjectRelocationDescriptor*
+UnifiedRelocatableWrappable::GetObjectRelocationDescriptor() {
+  static constexpr cppgc::internal::ObjectRelocationDescriptor kDesc = {
+      "UnifiedRelocatableWrappable",
+      cppgc::internal::RelocatableClassId::kGenericTestType,
+      alignof(UnifiedRelocatableWrappable),
+      sizeof(UnifiedRelocatableWrappable),
+      false,
+      false,
+      &cppgc::internal::DefaultRelocateObject<UnifiedRelocatableWrappable>,
+      nullptr,
+      nullptr};
+  return &kDesc;
+}
+
+class UnifiedDeadSpacer final
+    : public cppgc::GarbageCollected<UnifiedDeadSpacer> {
+ public:
+  void Trace(cppgc::Visitor*) const {}
+  uint64_t first() const { return words_[0]; }
+
+ private:
+  uint64_t words_[32] = {};
+};
+
+}  // namespace
+
+TEST_F(UnifiedHeapTest,
+       ForeignWrapperEdgeExcludesWrappedRelocatableTargetOnly) {
+  ManualGCScope manual_gc(i_isolate());
+  cppgc::internal::SetTestingForceObjectCompaction(true);
+
+  auto& cpp_heap = *CppHeap::From(isolate()->heap()->cpp_heap());
+  cpp_heap.object_compactor().SetEnabled(true);
+
+  cppgc::Persistent<UnifiedRelocatableWrappable> wrapped_target =
+      cppgc::MakeGarbageCollected<UnifiedRelocatableWrappable>(
+          allocation_handle(), 777);
+  for (int i = 0; i < 450; ++i) {
+    cppgc::MakeGarbageCollected<UnifiedDeadSpacer>(allocation_handle());
+  }
+  cppgc::Persistent<UnifiedRelocatableWrappable> unwrapped_target =
+      cppgc::MakeGarbageCollected<UnifiedRelocatableWrappable>(
+          allocation_handle(), 888);
+
+  v8::Global<v8::Object> js_wrapper;
+  {
+    v8::HandleScope scope(v8_isolate());
+    v8::Local<v8::Object> local_wrapper = WrapperHelper::CreateWrapper(
+        v8_isolate()->GetCurrentContext(), wrapped_target.Get());
+    js_wrapper.Reset(v8_isolate(), local_wrapper);
+  }
+
+  const void* orig_wrapped_addr = wrapped_target.Get();
+  const void* orig_unwrapped_addr = unwrapped_target.Get();
+
+  {
+    EmbedderStackStateScope stack_scope(
+        heap(), EmbedderStackStateOrigin::kExplicitInvocation,
+        StackState::kNoHeapPointers);
+    InvokeMemoryReducingMajorGCs();
+    cpp_heap.AsBase().sweeper().FinishIfRunning();
+  }
+
+  EXPECT_EQ(orig_wrapped_addr, wrapped_target.Get());
+  EXPECT_NE(orig_unwrapped_addr, unwrapped_target.Get());
+  EXPECT_EQ(777u, wrapped_target->id());
+  EXPECT_EQ(888u, unwrapped_target->id());
+
+  cpp_heap.object_compactor().SetEnabled(false);
+  cppgc::internal::SetTestingForceObjectCompaction(false);
+}
+
 }  // namespace v8::internal

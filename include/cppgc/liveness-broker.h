@@ -57,7 +57,10 @@ class V8_EXPORT LivenessBroker final {
 
   template <typename T>
   bool IsHeapObjectAlive(const WeakMember<T>& weak_member) const {
-    return IsHeapObjectAlive<T>(weak_member.Get());
+    const T* object = weak_member.Get();
+    return !object || object == kSentinelPointer ||
+           IsHeapObjectAliveTypedWeakImpl(
+               TraceTrait<T>::GetTraceDescriptor(object).base_object_payload);
   }
 
   template <typename T>
@@ -66,9 +69,13 @@ class V8_EXPORT LivenessBroker final {
   }
 
  private:
-  LivenessBroker() = default;
+  explicit LivenessBroker(bool pins_raw_queries = false)
+      : pins_raw_queries_(pins_raw_queries) {}
 
   bool IsHeapObjectAliveImpl(const void*) const;
+  bool IsHeapObjectAliveTypedWeakImpl(const void*) const;
+
+  bool pins_raw_queries_ = false;
 
   friend class internal::LivenessBrokerFactory;
 };

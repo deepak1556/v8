@@ -457,11 +457,13 @@ void MarkerBase::ProcessWeakness() {
     // Then, process custom weak callbacks.
     StatsCollector::EnabledScope inner_stats_scope(
         heap().stats_collector(), StatsCollector::kCustomCallbacksProcessing);
+    LivenessBroker custom_broker =
+        LivenessBrokerFactory::Create(/*pins_raw_queries=*/true);
     MarkingWorklists::WeakCallbackItem item;
     MarkingWorklists::WeakCustomCallbackWorklist::Local& custom_callbacks =
         mutator_marking_state_.weak_custom_callback_worklist();
     while (custom_callbacks.Pop(&item)) {
-      item.callback(broker, item.parameter);
+      item.callback(custom_broker, item.parameter);
 #if defined(CPPGC_YOUNG_GENERATION)
       if (heap().generational_gc_supported()) {
         heap().remembered_set().AddWeakCallback(item);

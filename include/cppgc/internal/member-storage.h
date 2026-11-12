@@ -101,6 +101,10 @@ class V8_TRIVIAL_ABI CompressedPointer final {
     reinterpret_cast<std::atomic<IntegralType>&>(value_).store(
         Compress(value), std::memory_order_relaxed);
   }
+  V8_INLINE void StoreFromGC(const void* value) const {
+    reinterpret_cast<std::atomic<IntegralType>&>(value_).store(
+        Compress(value), std::memory_order_relaxed);
+  }
 
   V8_INLINE void Clear() { value_ = 0u; }
   V8_INLINE bool IsCleared() const { return !value_; }
@@ -192,7 +196,7 @@ class V8_TRIVIAL_ABI CompressedPointer final {
   // All constructors initialize `value_`. Do not add a default value here as it
   // results in a non-atomic write on some builds, even when the atomic version
   // of the constructor is used.
-  IntegralType value_;
+  mutable IntegralType value_;
 };
 
 template <typename Callback>
@@ -250,6 +254,10 @@ class V8_TRIVIAL_ABI RawPointer final {
     reinterpret_cast<std::atomic<const void*>&>(ptr_).store(
         ptr, std::memory_order_relaxed);
   }
+  V8_INLINE void StoreFromGC(const void* ptr) const {
+    reinterpret_cast<std::atomic<const void*>&>(ptr_).store(
+        ptr, std::memory_order_relaxed);
+  }
 
   V8_INLINE void Clear() { ptr_ = nullptr; }
   V8_INLINE bool IsCleared() const { return !ptr_; }
@@ -290,7 +298,7 @@ class V8_TRIVIAL_ABI RawPointer final {
   // All constructors initialize `ptr_`. Do not add a default value here as it
   // results in a non-atomic write on some builds, even when the atomic version
   // of the constructor is used.
-  const void* ptr_;
+  mutable const void* ptr_;
 };
 
 #if defined(CPPGC_POINTER_COMPRESSION)

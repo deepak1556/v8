@@ -39,6 +39,10 @@ class PreFinalizerHandler final {
     return std::exchange(bytes_allocated_in_prefinalizers, 0);
   }
 
+  const std::vector<PreFinalizer>& ordered_pre_finalizers() const {
+    return ordered_pre_finalizers_;
+  }
+
  private:
   // Checks that the current thread is the thread that created the heap.
   bool CurrentThreadIsCreationThread();

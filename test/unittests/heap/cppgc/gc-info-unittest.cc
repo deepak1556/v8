@@ -20,7 +20,9 @@ namespace internal {
 #if !defined(CPPGC_ENABLE_OBJECT_SECTION_GCINFO)
 namespace {
 
-constexpr GCInfo GetEmptyGCInfo() { return {nullptr, nullptr, nullptr}; }
+constexpr GCInfo GetEmptyGCInfo() {
+  return {nullptr, nullptr, nullptr, nullptr};
+}
 
 class GCInfoTableTest : public ::testing::Test {
  public:
@@ -346,6 +348,75 @@ TEST_F(GCInfoTraitTest, FoldingMatches) {
 #endif
 }
 #endif
+
+namespace {
+
+class ExactRelocatableChild : public TriviallyDestructibleBase {
+ public:
+  CPPGC_DECLARE_EXACT_RELOCATABLE_TYPE(ExactRelocatableChild);
+  ExactRelocatableChild() = default;
+  ExactRelocatableChild(ExactRelocatableChild&&) noexcept = default;
+};
+
+class UnoptedDerivedFromExactRelocatable : public ExactRelocatableChild {};
+
+const ObjectRelocationDescriptor*
+ExactRelocatableChild::GetObjectRelocationDescriptor() {
+  static constexpr ObjectRelocationDescriptor kDesc = {
+      "ExactRelocatableChild",
+      RelocatableClassId::kGenericTestType,
+      alignof(ExactRelocatableChild),
+      sizeof(ExactRelocatableChild),
+      false,
+      false,
+      &DefaultRelocateObject<ExactRelocatableChild>,
+      nullptr,
+      nullptr};
+  return &kDesc;
+}
+
+static_assert(IsExactRelocationOwnerMatch<ExactRelocatableChild>::value,
+              "ExactRelocatableChild must have exact relocation marker");
+static_assert(
+    !IsExactRelocationOwnerMatch<UnoptedDerivedFromExactRelocatable>::value,
+    "Derived class without its own marker must not inherit relocation opt-in");
+static_assert(
+    std::is_same_v<
+        typename internal::GCInfoFolding<
+            ExactRelocatableChild,
+            ExactRelocatableChild::ParentMostGarbageCollectedType>::ResultType,
+        ExactRelocatableChild>,
+    "Exact-relocatable child must never fold into base GCInfo");
+static_assert(
+    std::is_same_v<typename internal::GCInfoFolding<
+                       UnoptedDerivedFromExactRelocatable,
+                       UnoptedDerivedFromExactRelocatable::
+                           ParentMostGarbageCollectedType>::ResultType,
+                   UnoptedDerivedFromExactRelocatable>,
+    "Subclass of exact-relocatable type must never fold into parent GCInfo");
+
+}  // namespace
+
+TEST_F(GCInfoTraitTest, ExactRelocationPreventsFoldingAndIsolatesSubclasses) {
+  const GCInfoIndex base_index =
+      GCInfoTrait<TriviallyDestructibleBase>::Index();
+  const GCInfoIndex exact_index = GCInfoTrait<ExactRelocatableChild>::Index();
+  const GCInfoIndex sub_index =
+      GCInfoTrait<UnoptedDerivedFromExactRelocatable>::Index();
+  EXPECT_NE(base_index, exact_index);
+  EXPECT_NE(exact_index, sub_index);
+
+  const GCInfo& base_info = GlobalGCInfoTable::GCInfoFromIndex(base_index);
+  const GCInfo& exact_info = GlobalGCInfoTable::GCInfoFromIndex(exact_index);
+  const GCInfo& sub_info = GlobalGCInfoTable::GCInfoFromIndex(sub_index);
+  ASSERT_NE(nullptr, base_info.relocation);
+  EXPECT_EQ(RelocatableClassId::kGenericAutoType,
+            base_info.relocation->class_id);
+  ASSERT_NE(nullptr, exact_info.relocation);
+  EXPECT_EQ(RelocatableClassId::kGenericTestType,
+            exact_info.relocation->class_id);
+  EXPECT_EQ(nullptr, sub_info.relocation);
+}
 
 }  // namespace internal
 }  // namespace cppgc

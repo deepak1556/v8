@@ -11,6 +11,7 @@
 
 #include "cppgc/internal/api-constants.h"
 #include "cppgc/internal/member-storage.h"
+#include "cppgc/internal/object-relocation.h"
 #include "cppgc/internal/pointer-policies.h"
 #include "cppgc/sentinel-pointer.h"
 #include "cppgc/type-traits.h"
@@ -65,6 +66,10 @@ class V8_TRIVIAL_ABI MemberBase {
   V8_INLINE bool IsCleared() const { return raw_.IsCleared(); }
 
   V8_INLINE void ClearFromGC() const { raw_.Clear(); }
+  V8_INLINE void SetRawFromGC(const void* value) const {
+    raw_.StoreFromGC(value);
+  }
+  V8_INLINE const RawStorage* GetRawStorageSlotFromGC() const { return &raw_; }
 
  private:
   friend class MemberDebugHelper;
@@ -305,17 +310,41 @@ class V8_TRIVIAL_ABI BasicMember final : private MemberBase<StorageType>,
   }
 
   V8_INLINE void InitializingWriteBarrier(T* value) const {
+    if constexpr (std::is_same_v<WeaknessTag, UntracedMemberTag>) {
+      const void* raw = static_cast<const void*>(value);
+      if (raw && raw != kSentinelPointer) {
+        ObjectPinningApi::RecordUntracedMemberTarget(raw);
+      }
+    }
     WriteBarrierPolicy::InitializingBarrier(Base::GetRawSlot(), value);
   }
   V8_INLINE void InitializingWriteBarrier() const {
+    if constexpr (std::is_same_v<WeaknessTag, UntracedMemberTag>) {
+      const void* raw = Base::GetRaw();
+      if (raw && raw != kSentinelPointer) {
+        ObjectPinningApi::RecordUntracedMemberTarget(raw);
+      }
+    }
     WriteBarrierPolicy::InitializingBarrier(Base::GetRawSlot(),
                                             Base::GetRawStorage());
   }
   V8_INLINE void AssigningWriteBarrier(T* value) const {
+    if constexpr (std::is_same_v<WeaknessTag, UntracedMemberTag>) {
+      const void* raw = static_cast<const void*>(value);
+      if (raw && raw != kSentinelPointer) {
+        ObjectPinningApi::RecordUntracedMemberTarget(raw);
+      }
+    }
     WriteBarrierPolicy::template AssigningBarrier<
         StorageType::kWriteBarrierSlotType>(Base::GetRawSlot(), value);
   }
   V8_INLINE void AssigningWriteBarrier() const {
+    if constexpr (std::is_same_v<WeaknessTag, UntracedMemberTag>) {
+      const void* raw = Base::GetRaw();
+      if (raw && raw != kSentinelPointer) {
+        ObjectPinningApi::RecordUntracedMemberTarget(raw);
+      }
+    }
     WriteBarrierPolicy::template AssigningBarrier<
         StorageType::kWriteBarrierSlotType>(Base::GetRawSlot(),
                                             Base::GetRawStorage());
@@ -328,6 +357,12 @@ class V8_TRIVIAL_ABI BasicMember final : private MemberBase<StorageType>,
   }
 
   V8_INLINE void ClearFromGC() const { Base::ClearFromGC(); }
+
+  V8_INLINE void SetFromGC(T* value) const { Base::SetRawFromGC(value); }
+
+  V8_INLINE const RawStorage* GetRawStorageSlotFromGC() const {
+    return Base::GetRawStorageSlotFromGC();
+  }
 
   V8_INLINE T* GetFromGC() const { return Get(); }
 

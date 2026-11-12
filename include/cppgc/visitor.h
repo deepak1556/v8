@@ -11,6 +11,7 @@
 #include "cppgc/garbage-collected.h"
 #include "cppgc/internal/logging.h"
 #include "cppgc/internal/member-storage.h"
+#include "cppgc/internal/object-relocation.h"
 #include "cppgc/internal/pointer-policies.h"
 #include "cppgc/liveness-broker.h"
 #include "cppgc/macros.h"
@@ -23,6 +24,7 @@
 namespace cppgc {
 
 namespace internal {
+class CrossThreadPersistentBase;
 template <typename T, typename WeaknessPolicy, typename LocationPolicy,
           typename CheckingPolicy>
 class BasicCrossThreadPersistent;
@@ -87,6 +89,23 @@ class V8_EXPORT Visitor {
 
   virtual ~Visitor() = default;
 
+  class AddressKeyedTraceScope final {
+    CPPGC_STACK_ALLOCATED();
+
+   public:
+    explicit AddressKeyedTraceScope(Visitor& visitor)
+        : visitor_(visitor), prev_(visitor.is_tracing_address_keyed_slot_) {
+      visitor_.is_tracing_address_keyed_slot_ = true;
+    }
+    ~AddressKeyedTraceScope() {
+      visitor_.is_tracing_address_keyed_slot_ = prev_;
+    }
+
+   private:
+    Visitor& visitor_;
+    const bool prev_;
+  };
+
   /**
    * Trace method for Member.
    *
@@ -96,6 +115,14 @@ class V8_EXPORT Visitor {
   void Trace(const Member<T>& member) {
     const T* value = member.GetAtomic();
     CPPGC_DCHECK(value != kSentinelPointer);
+    if (V8_UNLIKELY(is_relocation_recording_) && value) {
+      VisitRelocatableMemberSlot(
+          member.GetRawStorageSlotFromGC(), value,
+          TraceTrait<T>::GetTraceDescriptor(value),
+          DefaultMemberStorageCodec(/*is_weak=*/false),
+          internal::RelocationReferenceStrength::kStrong,
+          &RetargetRawStorageSlot<typename Member<T>::RawStorage>);
+    }
     TraceImpl(value);
   }
 
@@ -120,8 +147,15 @@ class V8_EXPORT Visitor {
     }
 
     CPPGC_DCHECK(value != kSentinelPointer);
-    VisitWeak(value, TraceTrait<T>::GetTraceDescriptor(value),
-              &HandleWeak<WeakMember<T>>, &weak_member);
+    TraceDescriptor desc = TraceTrait<T>::GetTraceDescriptor(value);
+    if (V8_UNLIKELY(is_relocation_recording_)) {
+      VisitRelocatableMemberSlot(
+          weak_member.GetRawStorageSlotFromGC(), value, desc,
+          DefaultMemberStorageCodec(/*is_weak=*/true),
+          internal::RelocationReferenceStrength::kWeak,
+          &RetargetRawStorageSlot<typename WeakMember<T>::RawStorage>);
+    }
+    VisitWeak(value, desc, &HandleWeak<WeakMember<T>>, &weak_member);
   }
 
 #if defined(CPPGC_POINTER_COMPRESSION)
@@ -134,6 +168,15 @@ class V8_EXPORT Visitor {
   void Trace(const subtle::UncompressedMember<T>& member) {
     const T* value = member.GetAtomic();
     CPPGC_DCHECK(value != kSentinelPointer);
+    if (V8_UNLIKELY(is_relocation_recording_) && value) {
+      VisitRelocatableMemberSlot(
+          member.GetRawStorageSlotFromGC(), value,
+          TraceTrait<T>::GetTraceDescriptor(value),
+          internal::RelocationStorageCodec::kUncompressedMember,
+          internal::RelocationReferenceStrength::kStrong,
+          &RetargetRawStorageSlot<
+              typename subtle::UncompressedMember<T>::RawStorage>);
+    }
     TraceImpl(value);
   }
 #endif  // defined(CPPGC_POINTER_COMPRESSION)
@@ -248,9 +291,22 @@ class V8_EXPORT Visitor {
     TraceDescriptor value_desc =
         TraceTrait<ValueType>::GetTraceDescriptor(value);
     CPPGC_DCHECK(value_desc.base_object_payload);
-    const void* key_base_object_payload =
-        TraceTrait<KeyType>::GetTraceDescriptor(key).base_object_payload;
+    TraceDescriptor key_desc = TraceTrait<KeyType>::GetTraceDescriptor(key);
+    const void* key_base_object_payload = key_desc.base_object_payload;
     CPPGC_DCHECK(key_base_object_payload);
+
+    if (V8_UNLIKELY(is_relocation_recording_)) {
+      VisitRelocatableMemberSlot(
+          weak_member_key.GetRawStorageSlotFromGC(), key, key_desc,
+          DefaultMemberStorageCodec(/*is_weak=*/true),
+          internal::RelocationReferenceStrength::kEphemeronKey,
+          &RetargetRawStorageSlot<typename WeakMember<KeyType>::RawStorage>);
+      VisitRelocatableMemberSlot(
+          member_value->GetRawStorageSlotFromGC(), value, value_desc,
+          DefaultMemberStorageCodec(/*is_weak=*/false),
+          internal::RelocationReferenceStrength::kEphemeronValue,
+          &RetargetRawStorageSlot<typename Member<ValueType>::RawStorage>);
+    }
 
     VisitEphemeron(key_base_object_payload, value, value_desc);
   }
@@ -283,9 +339,20 @@ class V8_EXPORT Visitor {
     CPPGC_DCHECK(!value_desc.base_object_payload);
 
     // KeyType might be a GarbageCollectedMixin.
-    const void* key_base_object_payload =
-        TraceTrait<KeyType>::GetTraceDescriptor(key).base_object_payload;
+    TraceDescriptor key_desc = TraceTrait<KeyType>::GetTraceDescriptor(key);
+    const void* key_base_object_payload = key_desc.base_object_payload;
     CPPGC_DCHECK(key_base_object_payload);
+
+    if (V8_UNLIKELY(is_relocation_recording_)) {
+      VisitRelocatableMemberSlot(
+          weak_member_key.GetRawStorageSlotFromGC(), key, key_desc,
+          DefaultMemberStorageCodec(/*is_weak=*/true),
+          internal::RelocationReferenceStrength::kEphemeronKey,
+          &RetargetRawStorageSlot<typename WeakMember<KeyType>::RawStorage>);
+      if (value_desc.callback) {
+        value_desc.callback(this, value);
+      }
+    }
 
     VisitEphemeron(key_base_object_payload, value, value_desc);
   }
@@ -299,7 +366,35 @@ class V8_EXPORT Visitor {
   void TraceStrongly(const WeakMember<T>& weak_member) {
     const T* value = weak_member.GetAtomic();
     CPPGC_DCHECK(value != kSentinelPointer);
+    if (V8_UNLIKELY(is_relocation_recording_) && value) {
+      VisitRelocatableMemberSlot(
+          weak_member.GetRawStorageSlotFromGC(), value,
+          TraceTrait<T>::GetTraceDescriptor(value),
+          DefaultMemberStorageCodec(/*is_weak=*/true),
+          internal::RelocationReferenceStrength::kWeak,
+          &RetargetRawStorageSlot<typename WeakMember<T>::RawStorage>);
+    }
     TraceImpl(value);
+  }
+
+  template <typename T>
+  void TraceTaggedUncompressedMember(
+      const subtle::UncompressedMember<T>& member, uintptr_t tag_mask) {
+    const uintptr_t raw_val =
+        reinterpret_cast<uintptr_t>(member.GetRawAtomic());
+    const T* untagged = reinterpret_cast<const T*>(raw_val & ~tag_mask);
+    CPPGC_DCHECK(untagged != kSentinelPointer);
+    if (!untagged) return;
+    if (V8_UNLIKELY(is_relocation_recording_)) {
+      VisitRelocatableMemberSlot(
+          member.GetRawStorageSlotFromGC(), untagged,
+          TraceTrait<T>::GetTraceDescriptor(untagged),
+          internal::RelocationStorageCodec::kTaggedUncompressedMember,
+          internal::RelocationReferenceStrength::kStrong,
+          &RetargetTaggedRawStorageSlot<
+              typename subtle::UncompressedMember<T>::RawStorage>);
+    }
+    TraceImpl(untagged);
   }
 
   /**
@@ -309,6 +404,10 @@ class V8_EXPORT Visitor {
    */
   template <typename T>
   void TraceStrongContainer(const T* object) {
+    if (V8_UNLIKELY(is_relocation_recording_) && object) {
+      VisitUnretargetableContainerBacking(
+          TraceTrait<T>::GetTraceDescriptor(object));
+    }
     TraceImpl(object);
   }
 
@@ -324,6 +423,10 @@ class V8_EXPORT Visitor {
   void TraceWeakContainer(const T* object, WeakCallback callback,
                           const void* callback_data) {
     if (!object) return;
+    if (V8_UNLIKELY(is_relocation_recording_)) {
+      VisitUnretargetableContainerBacking(
+          TraceTrait<T>::GetTraceDescriptor(object));
+    }
     VisitWeakContainer(object, TraceTrait<T>::GetTraceDescriptor(object),
                        TraceTrait<T>::GetWeakTraceDescriptor(object), callback,
                        callback_data);
@@ -379,6 +482,14 @@ class V8_EXPORT Visitor {
   virtual bool IsConcurrent() const { return false; }
 
  protected:
+  void set_is_relocation_recording(bool value) {
+    is_relocation_recording_ = value;
+  }
+  bool is_relocation_recording() const { return is_relocation_recording_; }
+  bool is_tracing_address_keyed_slot() const {
+    return is_tracing_address_keyed_slot_;
+  }
+
   virtual void Visit(const void* self, TraceDescriptor) {}
   virtual void VisitWeak(const void* self, TraceDescriptor, WeakCallback,
                          const void* weak_member) {}
@@ -388,6 +499,12 @@ class V8_EXPORT Visitor {
                                   TraceDescriptor weak_desc,
                                   WeakCallback callback, const void* data) {}
   virtual void HandleMovableReference(const void**) {}
+  virtual void VisitRelocatableMemberSlot(
+      const void* slot_address, const void* pointee_address,
+      TraceDescriptor desc, internal::RelocationStorageCodec codec,
+      internal::RelocationReferenceStrength strength,
+      internal::TypedSlotRetargetCallback retarget_callback) {}
+  virtual void VisitUnretargetableContainerBacking(TraceDescriptor) {}
 
   virtual void VisitMultipleUncompressedMember(
       const void* start, size_t len,
@@ -400,7 +517,15 @@ class V8_EXPORT Visitor {
       const void* object = current->LoadAtomic();
       if (!object) continue;
 
-      Visit(object, get_trace_descriptor(object));
+      TraceDescriptor desc = get_trace_descriptor(object);
+      if (V8_UNLIKELY(is_relocation_recording_)) {
+        VisitRelocatableMemberSlot(
+            current, object, desc,
+            internal::RelocationStorageCodec::kUncompressedMember,
+            internal::RelocationReferenceStrength::kStrong,
+            &RetargetRawStorageSlot<internal::RawPointer>);
+      }
+      Visit(object, desc);
     }
   }
 
@@ -417,12 +542,51 @@ class V8_EXPORT Visitor {
       const void* object = current->LoadAtomic();
       if (!object) continue;
 
-      Visit(object, get_trace_descriptor(object));
+      TraceDescriptor desc = get_trace_descriptor(object);
+      if (V8_UNLIKELY(is_relocation_recording_)) {
+        VisitRelocatableMemberSlot(
+            current, object, desc,
+            internal::RelocationStorageCodec::kCompressedMember,
+            internal::RelocationReferenceStrength::kStrong,
+            &RetargetRawStorageSlot<internal::CompressedPointer>);
+      }
+      Visit(object, desc);
     }
   }
 #endif  // defined(CPPGC_POINTER_COMPRESSION)
 
  private:
+  static constexpr internal::RelocationStorageCodec DefaultMemberStorageCodec(
+      bool is_weak) {
+#if defined(CPPGC_POINTER_COMPRESSION)
+    return is_weak ? internal::RelocationStorageCodec::kCompressedWeakMember
+                   : internal::RelocationStorageCodec::kCompressedMember;
+#else
+    return is_weak ? internal::RelocationStorageCodec::kUncompressedWeakMember
+                   : internal::RelocationStorageCodec::kUncompressedMember;
+#endif
+  }
+
+  template <typename RawStorageType>
+  static void RetargetRawStorageSlot(const void* slot,
+                                     void* new_pointee_address) {
+    static_cast<const RawStorageType*>(slot)->StoreFromGC(new_pointee_address);
+  }
+
+  template <typename RawStorageType>
+  static void RetargetTaggedRawStorageSlot(const void* slot,
+                                           void* new_pointee_address) {
+    const auto* storage = static_cast<const RawStorageType*>(slot);
+    const uintptr_t old_val = reinterpret_cast<uintptr_t>(storage->Load());
+    const uintptr_t low_bits =
+        old_val & (internal::api_constants::kAllocationGranularity - 1);
+    void* tagged_new = reinterpret_cast<void*>(
+        reinterpret_cast<uintptr_t>(new_pointee_address) | low_bits);
+    storage->StoreFromGC(tagged_new);
+  }
+
+  bool is_relocation_recording_ = false;
+  bool is_tracing_address_keyed_slot_ = false;
   template <typename T, void (T::*method)(const LivenessBroker&)>
   static void WeakCallbackMethodDelegate(const LivenessBroker& info,
                                          const void* self) {
@@ -486,8 +650,21 @@ class V8_EXPORT RootVisitor {
     if (!object) {
       return;
     }
-    VisitRoot(object, TraceTrait<PointeeType>::GetTraceDescriptor(object),
-              ExtractLocation(p));
+    TraceDescriptor desc = TraceTrait<PointeeType>::GetTraceDescriptor(object);
+    if (V8_UNLIKELY(is_relocation_recording_)) {
+      constexpr bool kIsCrossThread =
+          std::is_base_of_v<internal::CrossThreadPersistentBase,
+                            AnyStrongPersistentType>;
+      VisitRelocatableRootSlot(
+          &p, object, desc,
+          kIsCrossThread
+              ? internal::RelocationStorageCodec::kCrossThreadPersistent
+              : internal::RelocationStorageCodec::kStrongPersistent,
+          kIsCrossThread ? nullptr
+                         : &RetargetPersistentSlot<AnyStrongPersistentType>,
+          ExtractLocation(p));
+    }
+    VisitRoot(object, desc, ExtractLocation(p));
   }
 
   template <typename AnyWeakPersistentType,
@@ -501,16 +678,51 @@ class V8_EXPORT RootVisitor {
     if (!object) {
       return;
     }
-    VisitWeakRoot(object, TraceTrait<PointeeType>::GetTraceDescriptor(object),
-                  &HandleWeak<AnyWeakPersistentType>, &p, ExtractLocation(p));
+    TraceDescriptor desc = TraceTrait<PointeeType>::GetTraceDescriptor(object);
+    if (V8_UNLIKELY(is_relocation_recording_)) {
+      constexpr bool kIsCrossThread =
+          std::is_base_of_v<internal::CrossThreadPersistentBase,
+                            AnyWeakPersistentType>;
+      VisitRelocatableRootSlot(
+          &p, object, desc,
+          kIsCrossThread
+              ? internal::RelocationStorageCodec::kCrossThreadPersistent
+              : internal::RelocationStorageCodec::kWeakPersistent,
+          kIsCrossThread ? nullptr
+                         : &RetargetPersistentSlot<AnyWeakPersistentType>,
+          ExtractLocation(p));
+    }
+    VisitWeakRoot(object, desc, &HandleWeak<AnyWeakPersistentType>, &p,
+                  ExtractLocation(p));
   }
 
  protected:
+  void set_is_relocation_recording(bool value) {
+    is_relocation_recording_ = value;
+  }
+  bool is_relocation_recording() const { return is_relocation_recording_; }
+
   virtual void VisitRoot(const void*, TraceDescriptor, SourceLocation) {}
   virtual void VisitWeakRoot(const void* self, TraceDescriptor, WeakCallback,
                              const void* weak_root, SourceLocation) {}
+  virtual void VisitRelocatableRootSlot(
+      const void* root_slot, const void* pointee_address, TraceDescriptor desc,
+      RelocationStorageCodec codec, TypedSlotRetargetCallback retarget_callback,
+      SourceLocation loc) {}
 
  private:
+  template <typename AnyPersistentType>
+  static void RetargetPersistentSlot(const void* slot,
+                                     void* new_pointee_address) {
+    if constexpr (!std::is_base_of_v<internal::CrossThreadPersistentBase,
+                                     AnyPersistentType>) {
+      using PointeeType = typename AnyPersistentType::PointeeType;
+      static_cast<const AnyPersistentType*>(slot)->SetFromGC(
+          static_cast<PointeeType*>(new_pointee_address));
+    }
+  }
+
+  bool is_relocation_recording_ = false;
   template <typename AnyPersistentType>
   static const void* Extract(AnyPersistentType& p) {
     using PointeeType = typename AnyPersistentType::PointeeType;

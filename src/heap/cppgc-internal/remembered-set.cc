@@ -354,6 +354,36 @@ void OldToNewRememberedSet::ReleaseCustomCallbacks() {
   remembered_weak_callbacks_.clear();
 }
 
+void OldToNewRememberedSet::RebaseForwardedCustomCallbackParameters() {
+  if (remembered_weak_callbacks_.empty()) return;
+  std::vector<WeakCallbackItem> updated;
+  updated.reserve(remembered_weak_callbacks_.size());
+  bool any_changed = false;
+  for (auto item : remembered_weak_callbacks_) {
+    if (item.parameter) {
+      BasePage* page =
+          BasePage::FromInnerAddress(&heap_, const_cast<void*>(item.parameter));
+      if (page && !page->is_large() &&
+          NormalPage::From(page)->is_evacuation_candidate()) {
+        if (const HeapObjectHeader* hdr =
+                page->TryObjectHeaderFromInnerAddress(item.parameter);
+            hdr && hdr->IsForwarded()) {
+          const size_t offset =
+              static_cast<ConstAddress>(item.parameter) - hdr->ObjectStart();
+          item.parameter = hdr->GetForwardedAddress() + offset;
+          any_changed = true;
+        }
+      }
+    }
+    updated.push_back(item);
+  }
+  if (!any_changed) return;
+  remembered_weak_callbacks_.clear();
+  for (const auto& item : updated) {
+    remembered_weak_callbacks_.insert(item);
+  }
+}
+
 void OldToNewRememberedSet::Reset() {
   DCHECK(heap_.generational_gc_supported());
   SlotRemover slot_remover(heap_);

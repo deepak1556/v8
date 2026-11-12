@@ -13,6 +13,7 @@
 
 #include "src/base/macros.h"
 #include "src/heap/base/basic-slot-set.h"
+#include "src/heap/cppgc-internal/heap-page.h"
 #include "src/heap/cppgc-internal/marking-worklists.h"
 
 namespace cppgc {
@@ -25,8 +26,6 @@ namespace internal {
 class HeapBase;
 class HeapObjectHeader;
 class MutatorMarkingState;
-
-class SlotSet : public ::heap::base::BasicSlotSet<kSlotSize> {};
 
 // OldToNewRememberedSet represents a per-heap set of old-to-new references.
 class V8_EXPORT_PRIVATE OldToNewRememberedSet final {
@@ -54,6 +53,7 @@ class V8_EXPORT_PRIVATE OldToNewRememberedSet final {
 
   void ExecuteCustomCallbacks(LivenessBroker);
   void ReleaseCustomCallbacks();
+  void RebaseForwardedCustomCallbackParameters();
 
   void Reset();
 

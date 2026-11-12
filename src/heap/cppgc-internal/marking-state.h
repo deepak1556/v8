@@ -39,6 +39,9 @@ class MarkingStateBase {
 
   V8_EXPORT_PRIVATE virtual void Publish();
 
+  HeapBase& heap() { return heap_; }
+  const HeapBase& heap() const { return heap_; }
+
   MarkingWorklists::MarkingWorklist::Local& marking_worklist() {
     return marking_worklist_;
   }

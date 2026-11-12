@@ -140,6 +140,7 @@ HeapBase::HeapBase(
                                     std::in_place, *this, *allocation_sampler)
                               : std::nullopt),
       compactor_(raw_heap_),
+      object_compactor_(*this),
       object_allocator_(
           raw_heap_, *page_backend_, *stats_collector_, *prefinalizer_handler_,
           *oom_handler_, garbage_collector,
@@ -186,6 +187,7 @@ void HeapBase::RemoveSampledObject(HeapObjectHeader* header) {
 }
 
 void HeapBase::FilterSampledObjects() {
+  object_compactor_.FilterUntracedTargetsAfterMarking();
   if (allocation_sampler_) {
     absl::erase_if(sampled_objects_, [this](HeapObjectHeader* header) {
       if (!header->IsMarked()) {

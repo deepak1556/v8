@@ -20,6 +20,7 @@
 #include "src/heap/cppgc-internal/marker.h"
 #include "src/heap/cppgc-internal/metric-recorder.h"
 #include "src/heap/cppgc-internal/object-allocator.h"
+#include "src/heap/cppgc-internal/object-compactor.h"
 #include "src/heap/cppgc-internal/platform.h"
 #include "src/heap/cppgc-internal/process-heap-statistics.h"
 #include "src/heap/cppgc-internal/process-heap.h"
@@ -151,6 +152,8 @@ class V8_EXPORT_PRIVATE HeapBase : public cppgc::HeapHandle,
   std::unique_ptr<MarkerBase>& GetMarkerRefForTesting() { return marker_; }
 
   Compactor& compactor() { return compactor_; }
+  ObjectCompactor& object_compactor() { return object_compactor_; }
+  const ObjectCompactor& object_compactor() const { return object_compactor_; }
 
   ObjectAllocator& object_allocator() { return object_allocator_; }
   const ObjectAllocator& object_allocator() const { return object_allocator_; }
@@ -347,6 +350,7 @@ class V8_EXPORT_PRIVATE HeapBase : public cppgc::HeapHandle,
   std::optional<CheckedAllocationSampler> allocation_sampler_;
 
   Compactor compactor_;
+  ObjectCompactor object_compactor_;
   ObjectAllocator object_allocator_;
   Sweeper sweeper_;
 

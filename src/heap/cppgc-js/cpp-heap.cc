@@ -546,6 +546,7 @@ CppHeap::CppHeap(
   no_gc_scope_++;
   stats_collector()->RegisterObserver(this);
   set_decommit_free_memory(v8_flags.cppgc_decommit_free_memory);
+  object_compactor().SetEnabled(v8_flags.cppgc_compact_objects);
 #ifdef V8_ENABLE_ALLOCATION_TIMEOUT
   object_allocator().UpdateAllocationTimeout();
 #endif  // V8_ENABLE_ALLOCATION_TIMEOUT
@@ -799,6 +800,7 @@ void CppHeap::UpdateGCCapabilitiesFromFlags() {
                    ? CppHeap::SweepingType::kIncremental
                    : CppHeap::SweepingType::kIncrementalAndConcurrent);
   set_decommit_free_memory(v8_flags.cppgc_decommit_free_memory);
+  object_compactor().SetEnabled(v8_flags.cppgc_compact_objects);
 }
 
 void CppHeap::InitializeMarking(
@@ -814,6 +816,10 @@ void CppHeap::InitializeMarking(
   }
 
   collection_type_ = collection_type;
+  object_compactor().SyncWithFlagsIfNotOverridden(
+      v8_flags.cppgc_compact_objects);
+  object_compactor().BeginForeignEdgeEpoch(collection_type ==
+                                           CollectionType::kMajor);
 
   CHECK(!sweeper_.IsSweepingInProgress());
 
@@ -948,6 +954,7 @@ void CppHeap::EnterFinalPause(cppgc::EmbedderStackState stack_state) {
   // make sure that we always enable young generation from the atomic pause.
   in_atomic_pause_ = true;
   if (!TracingInitialized()) return;
+  object_compactor().BeginConservativePinEpoch();
   auto& marker = marker_->To<UnifiedHeapMarker>();
   // Scan global handles conservatively in case we are attached to an Isolate.
   // TODO(1029379): Support global handle marking visitors with minor GC.
@@ -1078,6 +1085,10 @@ void CppHeap::CompactAndSweep() {
 
   {
     cppgc::subtle::NoGarbageCollectionScope no_gc(*this);
+    const bool is_memory_reducing_major_gc =
+        collection_type_.has_value() &&
+        *collection_type_ == CollectionType::kMajor &&
+        ShouldReduceMemory(current_gc_flags_);
     cppgc::internal::SweepingConfig::CompactableSpaceHandling
         compactable_space_handling;
     {
@@ -1086,6 +1097,7 @@ void CppHeap::CompactAndSweep() {
       if (isolate_) {
         global_handles_scope.emplace(*isolate_->traced_handles());
       }
+      object_compactor().CompactIfEnabled(is_memory_reducing_major_gc);
       compactable_space_handling = compactor_.CompactSpacesIfEnabled();
     }
     const cppgc::internal::SweepingConfig sweeping_config{
@@ -1099,6 +1111,7 @@ void CppHeap::CompactAndSweep() {
                    SweepingType::kAtomic == sweeping_config.sweeping_type);
     set_decommit_free_memory(v8_flags.cppgc_decommit_free_memory);
     sweeper().Start(sweeping_config);
+    object_compactor().EndForeignEdgeEpoch();
   }
 
   in_atomic_pause_ = false;

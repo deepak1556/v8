@@ -96,13 +96,7 @@ class TaggedUncompressedMember final {
   }
 
   void Trace(Visitor* v) const {
-    // Construct an untagged pointer and pass it to Visitor::Trace(). The plugin
-    // would warn that ptr_ is untraced, which is why CPPGC_PLUGIN_IGNORE is
-    // used.
-    auto* untagged = reinterpret_cast<Pointee*>(
-        reinterpret_cast<uintptr_t>(ptr_.GetRawAtomic()) & ~kTagBit);
-    UncompressedMember<Pointee> temp(untagged);
-    v->Trace(temp);
+    v->TraceTaggedUncompressedMember(ptr_, kTagBit);
   }
 
  private:

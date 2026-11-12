@@ -155,6 +155,8 @@ void Heap::StartGarbageCollection(GCConfig config) {
   sweeper_.FinishIfRunning();
 
   epoch_++;
+  object_compactor().BeginForeignEdgeEpoch(config.collection_type ==
+                                           CollectionType::kMajor);
 
 #if defined(CPPGC_YOUNG_GENERATION)
   if (config.collection_type == CollectionType::kMajor &&
@@ -196,6 +198,7 @@ void Heap::FinalizeGarbageCollectionImpl(StackState stack_state) {
     // This guards atomic pause marking, meaning that no internal method or
     // external callbacks are allowed to allocate new objects.
     cppgc::subtle::DisallowGarbageCollectionScope no_gc_scope(*this);
+    object_compactor().BeginConservativePinEpoch();
     marker_->FinishMarking(config_.stack_state);
   }
   marker_.reset();
@@ -218,6 +221,11 @@ void Heap::FinalizeGarbageCollectionImpl(StackState stack_state) {
   FilterSampledObjects();
 
   subtle::NoGarbageCollectionScope no_gc(*this);
+  const bool is_memory_reducing_major_gc =
+      config_.collection_type == CollectionType::kMajor &&
+      config_.free_memory_handling ==
+          SweepingConfig::FreeMemoryHandling::kReleaseMemory;
+  object_compactor().CompactIfEnabled(is_memory_reducing_major_gc);
   const SweepingConfig sweeping_config{
       config_.sweeping_type, SweepingConfig::CompactableSpaceHandling::kSweep,
       config_.free_memory_handling};
@@ -225,6 +233,7 @@ void Heap::FinalizeGarbageCollectionImpl(StackState stack_state) {
   if (config_.sweeping_type == SweepingConfig::SweepingType::kAtomic) {
     sweeper_.FinishIfRunning();
   }
+  object_compactor().EndForeignEdgeEpoch();
   in_atomic_pause_ = false;
 }
 

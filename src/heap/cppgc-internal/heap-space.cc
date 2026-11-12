@@ -42,9 +42,12 @@ BaseSpace::Pages BaseSpace::RemoveAllPages() {
 }
 
 NormalPageSpace::NormalPageSpace(RawHeap* heap, size_t index,
-                                 bool is_compactable, size_t cell_size)
+                                 bool is_compactable, size_t cell_size,
+                                 bool supports_object_compaction)
     : BaseSpace(heap, index, PageType::kNormal, is_compactable),
-      cell_size_(cell_size) {
+      cell_size_(cell_size),
+      supports_object_compaction_(!is_compactable &&
+                                  supports_object_compaction) {
   // Compaction relies on sliding objects of arbitrary sizes.
   DCHECK_IMPLIES(is_compactable, !is_size_class());
   DCHECK_IMPLIES(is_size_class(), cell_size >= kMinSizeClassSize);
