@@ -38,7 +38,7 @@ constexpr size_t kAllocationGranularity = 4;
 #endif  // !V8_HOST_ARCH_64_BIT
 constexpr size_t kAllocationMask = kAllocationGranularity - 1;
 
-constexpr size_t kPageSizeLog2 = 17;
+constexpr size_t kPageSizeLog2 = 16;
 constexpr size_t kPageSize = 1 << kPageSizeLog2;
 constexpr size_t kPageOffsetMask = kPageSize - 1;
 constexpr size_t kPageBaseMask = ~kPageOffsetMask;

@@ -30,7 +30,7 @@ static constexpr size_t kFullyConstructedBitFieldOffsetFromPayload =
 // Mask for in-construction bit.
 static constexpr uint16_t kFullyConstructedBitMask = uint16_t{1} << 15;
 
-static constexpr size_t kPageSizeBits = 17;
+static constexpr size_t kPageSizeBits = 16;
 static constexpr size_t kPageSize = size_t{1} << kPageSizeBits;
 
 static constexpr size_t kLargeObjectSizeThreshold = kPageSize / 2;

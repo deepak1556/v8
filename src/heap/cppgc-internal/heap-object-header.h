@@ -48,9 +48,10 @@ namespace internal {
 // Notes:
 // - See |GCInfoTable| for constraints on GCInfoIndex.
 // - |size| for regular objects is encoded with 15 bits but can actually
-//   represent sizes up to |kBlinkPageSize| (2^17) because allocations are
-//   always 4 byte aligned (see kAllocationGranularity) on 32bit. 64bit uses
-//   8 byte aligned allocations which leaves 1 bit unused.
+//   represent sizes up to 2^17 because allocations are always 4 byte aligned
+//   (see kAllocationGranularity) on 32bit. This is more than what is needed
+//   for objects on normal pages of size |kPageSize| (2^16). 64bit uses 8 byte
+//   aligned allocations which leaves 1 more bit unused.
 // - |size| for large objects is encoded as 0. The size of a large object is
 //   stored in |LargeObjectPage::PayloadSize()|.
 // - |mark bit| and |in construction| bits are located in separate 16-bit halves
