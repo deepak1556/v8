@@ -335,11 +335,9 @@ bool ObjectAllocator::TryRefillLinearAllocationBufferFromFreeList(
   const FreeList::Block entry = space.free_list().Allocate(size);
   if (!entry.address) return false;
 
-  // Assume discarded memory on that page is now zero.
   auto& page = *NormalPage::From(BasePage::FromPayload(entry.address));
   if (page.discarded_memory()) {
-    stats_collector_.DecrementDiscardedMemory(page.discarded_memory());
-    page.ResetDiscardedMemory();
+    page.RecommitMemory(static_cast<Address>(entry.address), entry.size);
   }
 
   ClampAndReplaceLinearAllocationBuffer(

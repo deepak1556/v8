@@ -8,6 +8,7 @@
 #include <cstddef>
 
 #include "include/cppgc/internal/api-constants.h"
+#include "src/base/bits.h"
 #include "src/base/logging.h"
 #include "src/base/platform/mutex.h"
 #include "src/heap/cppgc-internal/globals.h"
@@ -51,14 +52,14 @@ const BasePage* BasePage::FromInnerAddress(const HeapBase* heap,
 
 // static
 void BasePage::Destroy(BasePage* page) {
-  if (page->discarded_memory()) {
-    page->space()
-        .raw_heap()
-        ->heap()
-        ->stats_collector()
-        ->DecrementDiscardedMemory(page->discarded_memory());
-  }
   if (page->is_large()) {
+    if (page->discarded_memory()) {
+      page->space()
+          .raw_heap()
+          ->heap()
+          ->stats_collector()
+          ->DecrementDiscardedMemory(page->discarded_memory());
+    }
     LargePage::Destroy(LargePage::From(page));
   } else {
     NormalPage::Destroy(NormalPage::From(page));
@@ -228,16 +229,91 @@ void NormalPage::Destroy(NormalPage* page) {
   const BaseSpace& space = page->space();
   DCHECK_EQ(space.end(), std::find(space.begin(), space.end(), page));
   USE(space);
+  const size_t discarded_memory = page->discarded_memory();
+  if (discarded_memory) {
+    heap.stats_collector()->DecrementDiscardedMemory(discarded_memory);
+  }
   page->~NormalPage();
   PageBackend* backend = heap.page_backend();
   heap.stats_collector()->NotifyFreedMemory(kPageSize);
-  backend->FreeNormalPageMemory(reinterpret_cast<Address>(page));
+  backend->FreeNormalPageMemory(
+      reinterpret_cast<Address>(page),
+      heap.decommit_free_memory() && discarded_memory > 0);
 }
 
 NormalPage::NormalPage(HeapBase& heap, BaseSpace& space)
     : BasePage(heap, space, PageType::kNormal), object_start_bitmap_() {
   DCHECK_LT(kLargeObjectSizeThreshold,
             static_cast<size_t>(PayloadEnd() - PayloadStart()));
+  const size_t commit_page_size =
+      heap.platform()->GetPageAllocator()->CommitPageSize();
+  active_system_pages_.Init(
+      kPageSize, v8::base::bits::WhichPowerOfTwo(commit_page_size), kPageSize);
+}
+
+void NormalPage::DiscardOrDecommitPages(Address begin, size_t size) {
+  PageAllocator& page_allocator = *heap().platform()->GetPageAllocator();
+  const size_t commit_page_size = page_allocator.CommitPageSize();
+  DCHECK_EQ(0u, reinterpret_cast<uintptr_t>(begin) % commit_page_size);
+  DCHECK_EQ(0u, size % commit_page_size);
+  DCHECK_LE(PayloadStart(), begin);
+  DCHECK_LE(begin + size, PayloadEnd());
+  const size_t page_size_bits =
+      v8::base::bits::WhichPowerOfTwo(commit_page_size);
+  const uintptr_t page_start = reinterpret_cast<uintptr_t>(this);
+  const uintptr_t start_offset =
+      reinterpret_cast<uintptr_t>(begin) - page_start;
+  const uintptr_t end_offset = start_offset + size;
+  const size_t removed_pages =
+      active_system_pages_.Remove(start_offset, end_offset, page_size_bits);
+  if (removed_pages == 0) {
+    return;
+  }
+  const size_t discarded_size = removed_pages << page_size_bits;
+  if (heap().decommit_free_memory()) {
+    CHECK(page_allocator.DecommitPages(begin, size));
+  } else {
+    CHECK(page_allocator.DiscardSystemPages(begin, size));
+  }
+  IncrementDiscardedMemory(discarded_size);
+  heap().stats_collector()->IncrementDiscardedMemory(discarded_size);
+}
+
+void NormalPage::RecommitMemory(Address begin, size_t size) {
+  if (!discarded_memory()) {
+    return;
+  }
+  DCHECK_LE(PayloadStart(), begin);
+  DCHECK_LE(begin + size, PayloadEnd());
+  PageAllocator& page_allocator = *heap().platform()->GetPageAllocator();
+  const size_t commit_page_size = page_allocator.CommitPageSize();
+  const size_t page_size_bits =
+      v8::base::bits::WhichPowerOfTwo(commit_page_size);
+  const uintptr_t page_start = reinterpret_cast<uintptr_t>(this);
+  const uintptr_t start_offset =
+      reinterpret_cast<uintptr_t>(begin) - page_start;
+  const uintptr_t end_offset = start_offset + size;
+  const size_t added_pages =
+      active_system_pages_.Add(start_offset, end_offset, page_size_bits);
+  if (added_pages == 0) {
+    return;
+  }
+  const size_t recommitted_size = added_pages << page_size_bits;
+  if (heap().decommit_free_memory()) {
+    const uintptr_t aligned_start =
+        RoundDown(reinterpret_cast<uintptr_t>(begin), commit_page_size);
+    const uintptr_t aligned_end =
+        RoundUp(reinterpret_cast<uintptr_t>(begin + size), commit_page_size);
+    const size_t aligned_size = aligned_end - aligned_start;
+    CHECK(page_allocator.RecommitPages(
+        reinterpret_cast<void*>(aligned_start), aligned_size,
+        v8::PageAllocator::Permission::kReadWrite));
+    CHECK(page_allocator.SetPermissions(
+        reinterpret_cast<void*>(aligned_start), aligned_size,
+        v8::PageAllocator::Permission::kReadWrite));
+  }
+  DecrementDiscardedMemory(recommitted_size);
+  heap().stats_collector()->DecrementDiscardedMemory(recommitted_size);
 }
 
 NormalPage::iterator NormalPage::begin() {

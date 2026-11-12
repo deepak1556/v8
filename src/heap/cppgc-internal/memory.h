@@ -52,9 +52,10 @@ V8_INLINE void CheckMemoryIsZero(const void* address, size_t size) {
 
 #if CPPGC_SHOULD_ZAP_MEMORY
 
-void SetMemoryAccessible(void* address, size_t size);
-void SetMemoryInaccessible(void* address, size_t size);
-void CheckMemoryIsInaccessible(const void* address, size_t size);
+V8_EXPORT_PRIVATE void SetMemoryAccessible(void* address, size_t size);
+V8_EXPORT_PRIVATE void SetMemoryInaccessible(void* address, size_t size);
+V8_EXPORT_PRIVATE void CheckMemoryIsInaccessible(const void* address,
+                                                 size_t size);
 
 constexpr bool CheckMemoryIsInaccessibleIsNoop() {
 #if defined(V8_USE_MEMORY_SANITIZER)

@@ -241,6 +241,9 @@ class V8_EXPORT_PRIVATE HeapBase : public cppgc::HeapHandle,
   MarkingType marking_support() const { return marking_support_; }
   SweepingType sweeping_support() const { return sweeping_support_; }
 
+  bool decommit_free_memory() const { return decommit_free_memory_; }
+  void set_decommit_free_memory(bool value) { decommit_free_memory_ = value; }
+
   bool incremental_marking_supported() const {
     return marking_support_ != MarkingType::kAtomic;
   }
@@ -371,6 +374,7 @@ class V8_EXPORT_PRIVATE HeapBase : public cppgc::HeapHandle,
 
   MarkingType marking_support_;
   SweepingType sweeping_support_;
+  bool decommit_free_memory_ = false;
 
   HeapObjectNameForUnnamedObject name_for_unnamed_object_ =
       HeapObjectNameForUnnamedObject::kUseHiddenName;

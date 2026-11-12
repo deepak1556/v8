@@ -112,7 +112,9 @@ void NormalPageMemoryPool::Add(PageMemoryRegion* pmr) {
   {
     void* base = pmr->region().base();
 #if CPPGC_SHOULD_ZAP_MEMORY
-    const size_t size = pmr->region().size();
+    const size_t size = pmr->has_decommitted_memory()
+                            ? NormalPage::PageHeaderSize()
+                            : pmr->region().size();
 #else
     // In release builds, swept page payloads are already zero-initialized by
     // SetMemoryInaccessible(). Only the page header needs to be zeroed.
@@ -132,6 +134,16 @@ PageMemoryRegion* NormalPageMemoryPool::Take() {
   void* base = pmr->region().base();
   const size_t size = pmr->region().size();
   ASAN_UNPOISON_MEMORY_REGION(base, size);
+  if (pmr->has_decommitted_memory()) {
+    CHECK(pmr->allocator().RecommitPages(
+        base, size, v8::PageAllocator::Permission::kReadWrite));
+    CHECK(pmr->allocator().SetPermissions(
+        base, size, v8::PageAllocator::Permission::kReadWrite));
+#if CPPGC_SHOULD_ZAP_MEMORY
+    std::memset(base, 0, size);
+#endif
+    pmr->set_has_decommitted_memory(false);
+  }
 
 #if DEBUG
   CheckMemoryIsZero(base, size);
@@ -180,10 +192,12 @@ Address PageBackend::TryAllocateNormalPageMemory() {
   return nullptr;
 }
 
-void PageBackend::FreeNormalPageMemory(Address writeable_base) {
+void PageBackend::FreeNormalPageMemory(Address writeable_base,
+                                       bool has_decommitted_memory) {
   v8::base::MutexGuard guard(&mutex_);
   auto* pmr = page_memory_region_tree_.Lookup(writeable_base);
   DCHECK_NOT_NULL(pmr);
+  pmr->set_has_decommitted_memory(has_decommitted_memory);
   page_memory_region_tree_.Remove(pmr);
   page_pool_.Add(pmr);
 }

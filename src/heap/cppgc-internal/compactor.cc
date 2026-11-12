@@ -261,6 +261,9 @@ class CompactionState final {
       used_bytes_in_current_page_ = 0;
       compact_frontier = current_page_->PayloadStart();
     }
+    if (current_page_->discarded_memory()) {
+      current_page_->RecommitMemory(compact_frontier, size);
+    }
     if (V8_LIKELY(compact_frontier != header)) {
       // Use a non-overlapping copy, if possible.
       if (current_page_ == page) {
@@ -288,6 +291,9 @@ class CompactionState final {
 
     // Return remaining available pages back to the backend.
     for (NormalPage* page : available_pages_) {
+      if (page->discarded_memory()) {
+        page->RecommitMemory(page->PayloadStart(), page->PayloadSize());
+      }
       SetMemoryInaccessible(page->PayloadStart(), page->PayloadSize());
       NormalPage::Destroy(page);
     }
@@ -317,6 +323,9 @@ class CompactionState final {
           current_page_->PayloadSize() - used_bytes_in_current_page_;
       Address payload = current_page_->PayloadStart();
       Address free_start = payload + used_bytes_in_current_page_;
+      if (current_page_->discarded_memory()) {
+        current_page_->RecommitMemory(free_start, freed_size);
+      }
       SetMemoryInaccessible(free_start, freed_size);
       space_->free_list().Add({free_start, freed_size});
       current_page_->object_start_bitmap().SetBit(free_start);

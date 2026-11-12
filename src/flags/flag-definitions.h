@@ -2634,6 +2634,8 @@ DEFINE_IMPLICATION(cppgc_young_generation, minor_ms)
 // optimization.
 DEFINE_NEG_IMPLICATION(cppgc_young_generation, reclaim_unmodified_wrappers)
 DEFINE_BOOL(optimize_gc_for_battery, false, "optimize GC for battery")
+DEFINE_BOOL(cppgc_decommit_free_memory, false,
+            "decommit free memory on cppgc pages during memory reducing sweeps")
 #if defined(V8_ATOMIC_OBJECT_FIELD_WRITES)
 DEFINE_BOOL(concurrent_marking, true, "use concurrent marking")
 #else

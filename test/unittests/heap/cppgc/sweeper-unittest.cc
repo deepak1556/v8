@@ -14,6 +14,7 @@
 #include "src/heap/cppgc-internal/heap-page.h"
 #include "src/heap/cppgc-internal/heap-visitor.h"
 #include "src/heap/cppgc-internal/heap.h"
+#include "src/heap/cppgc-internal/memory.h"
 #include "src/heap/cppgc-internal/object-view.h"
 #include "src/heap/cppgc-internal/page-memory.h"
 #include "src/heap/cppgc-internal/stats-collector.h"
@@ -389,21 +390,25 @@ TEST_F(SweeperTest, AllocationDuringFinalizationIsNotSwept) {
 }
 
 TEST_F(SweeperTest, DiscardingNormalPageMemory) {
-  if (!Sweeper::CanDiscardMemory()) return;
+  Heap::From(GetHeap())->set_decommit_free_memory(true);
+  if (!Sweeper::CanDiscardMemory(true)) return;
 
   // Test ensures that free list payload is discarded and accounted for on page
-  // level.
-  auto* holder = MakeGarbageCollected<GCed<1>>(GetAllocationHandle());
+  // level. The object is held by a Persistent as it needs to stay alive across
+  // both GCs below; a raw pointer that is no longer used may not be found by
+  // conservative stack scanning.
+  Persistent<GCed<1>> holder =
+      MakeGarbageCollected<GCed<1>>(GetAllocationHandle());
   ConservativeMemoryDiscardingGC();
-  auto* page = NormalPage::FromPayload(holder);
+  auto* page = NormalPage::FromPayload(holder.Get());
   // Assume the `holder` object is the first on the page for simplifying exact
   // discarded count.
   ASSERT_EQ(static_cast<void*>(page->PayloadStart() + sizeof(HeapObjectHeader)),
-            holder);
+            holder.Get());
   // No other object on the page is live.
   Address free_list_payload_start =
       page->PayloadStart() +
-      HeapObjectHeader::FromObject(holder).AllocatedSize() +
+      HeapObjectHeader::FromObject(holder.Get()).AllocatedSize() +
       sizeof(kFreeListEntrySize);
   uintptr_t start =
       RoundUp(reinterpret_cast<uintptr_t>(free_list_payload_start),
@@ -412,6 +417,59 @@ TEST_F(SweeperTest, DiscardingNormalPageMemory) {
                             GetPlatform().GetPageAllocator()->CommitPageSize());
   EXPECT_GT(end, start);
   EXPECT_EQ(page->discarded_memory(), end - start);
+  EXPECT_EQ(Heap::From(GetHeap())->stats_collector()->discarded_memory_size(),
+            end - start);
+
+  // Repeated memory-reducing GC without new allocations should keep the same
+  // discarded memory size.
+  ConservativeMemoryDiscardingGC();
+  EXPECT_EQ(page->discarded_memory(), end - start);
+  EXPECT_EQ(Heap::From(GetHeap())->stats_collector()->discarded_memory_size(),
+            end - start);
+}
+
+TEST_F(SweeperTest, DiscardAndRecommitNormalPageMemory) {
+  Heap* heap = Heap::From(GetHeap());
+  heap->set_decommit_free_memory(true);
+  auto* holder = MakeGarbageCollected<GCed<1>>(GetAllocationHandle());
+  auto* page = NormalPage::From(BasePage::FromPayload(holder));
+  const size_t commit_page_size =
+      GetPlatform().GetPageAllocator()->CommitPageSize();
+  uintptr_t aligned_start = RoundUp(
+      reinterpret_cast<uintptr_t>(page->PayloadStart()) + commit_page_size,
+      commit_page_size);
+  uintptr_t aligned_end = aligned_start + 3 * commit_page_size;
+  ASSERT_LE(aligned_end, reinterpret_cast<uintptr_t>(page->PayloadEnd()));
+
+  // Discard/decommit 3 system pages.
+  page->DiscardOrDecommitPages(reinterpret_cast<Address>(aligned_start),
+                               3 * commit_page_size);
+  EXPECT_EQ(3 * commit_page_size, page->discarded_memory());
+  EXPECT_EQ(3 * commit_page_size,
+            heap->stats_collector()->discarded_memory_size());
+
+  // Discarding the same range again is a no-op.
+  page->DiscardOrDecommitPages(reinterpret_cast<Address>(aligned_start),
+                               3 * commit_page_size);
+  EXPECT_EQ(3 * commit_page_size, page->discarded_memory());
+  EXPECT_EQ(3 * commit_page_size,
+            heap->stats_collector()->discarded_memory_size());
+
+  // Partially recommit the first system page.
+  page->RecommitMemory(reinterpret_cast<Address>(aligned_start),
+                       commit_page_size);
+  EXPECT_EQ(2 * commit_page_size, page->discarded_memory());
+  EXPECT_EQ(2 * commit_page_size,
+            heap->stats_collector()->discarded_memory_size());
+
+  // Recommit the remaining 2 system pages.
+  page->RecommitMemory(
+      reinterpret_cast<Address>(aligned_start + commit_page_size),
+      2 * commit_page_size);
+  EXPECT_EQ(0u, page->discarded_memory());
+  EXPECT_EQ(0u, heap->stats_collector()->discarded_memory_size());
+  SetMemoryInaccessible(reinterpret_cast<Address>(aligned_start),
+                        3 * commit_page_size);
   USE(holder);
 }
 

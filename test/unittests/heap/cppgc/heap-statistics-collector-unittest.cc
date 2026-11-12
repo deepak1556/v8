@@ -197,7 +197,8 @@ TEST_F(HeapStatisticsCollectorTest,
 
 TEST_F(HeapStatisticsCollectorTest,
        DetailedStatisticsWithDiscardingOnNormalPage) {
-  if (!Sweeper::CanDiscardMemory()) return;
+  Heap::From(GetHeap())->set_decommit_free_memory(true);
+  if (!Sweeper::CanDiscardMemory(true)) return;
 
   Persistent<GCed<1>> holder =
       MakeGarbageCollected<GCed<1>>(GetHeap()->GetAllocationHandle());

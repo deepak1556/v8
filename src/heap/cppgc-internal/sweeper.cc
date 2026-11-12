@@ -41,8 +41,9 @@ constexpr TaskPriority kForegroundLowPriority = TaskPriority::kUserVisible;
 
 // Returns true if memory discarding is requested and build config allows it.
 constexpr bool ShouldDiscardMemory(
-    SweepingConfig::FreeMemoryHandling free_memory_handling) {
-  return Sweeper::CanDiscardMemory() &&
+    SweepingConfig::FreeMemoryHandling free_memory_handling,
+    bool decommit_free_memory) {
+  return Sweeper::CanDiscardMemory(decommit_free_memory) &&
          free_memory_handling == FreeMemoryHandling::kReleaseMemory;
 }
 
@@ -129,7 +130,9 @@ class DiscardingFreeHandler : public FreeHandlerBase {
  public:
   DiscardingFreeHandler(PageAllocator& page_allocator, FreeList& free_list,
                         BasePage& page)
-      : page_allocator_(page_allocator), free_list_(free_list), page_(page) {}
+      : page_allocator_(page_allocator),
+        free_list_(free_list),
+        page_(*NormalPage::From(&page)) {}
 
   void Free(FreeList::Block block) {
     const auto unused_range = free_list_.AddReturningUnusedBounds(block);
@@ -140,16 +143,9 @@ class DiscardingFreeHandler : public FreeHandlerBase {
         RoundDown(reinterpret_cast<uintptr_t>(unused_range.second),
                   page_allocator_.CommitPageSize());
     if (aligned_begin_unused < aligned_end_unused) {
-      const size_t discarded_size = aligned_end_unused - aligned_begin_unused;
-      page_allocator_.DiscardSystemPages(
-          reinterpret_cast<void*>(aligned_begin_unused),
+      page_.DiscardOrDecommitPages(
+          reinterpret_cast<Address>(aligned_begin_unused),
           aligned_end_unused - aligned_begin_unused);
-      page_.IncrementDiscardedMemory(discarded_size);
-      page_.space()
-          .raw_heap()
-          ->heap()
-          ->stats_collector()
-          ->IncrementDiscardedMemory(discarded_size);
     }
   }
 
@@ -162,7 +158,7 @@ class DiscardingFreeHandler : public FreeHandlerBase {
  private:
   PageAllocator& page_allocator_;
   FreeList& free_list_;
-  BasePage& page_;
+  NormalPage& page_;
 };
 
 class RegularFreeHandler : public FreeHandlerBase {
@@ -582,7 +578,8 @@ class SweepFinalizer final {
     // Merge freelist with finalizers.
     if (!page_state->unfinalized_free_list.empty()) {
       std::unique_ptr<FreeHandlerBase> handler =
-          ShouldDiscardMemory(free_memory_handling_)
+          ShouldDiscardMemory(free_memory_handling_,
+                              page->heap().decommit_free_memory())
               ? std::unique_ptr<FreeHandlerBase>(new DiscardingFreeHandler(
                     *platform_->GetPageAllocator(), space_freelist, *page))
               : std::unique_ptr<FreeHandlerBase>(new RegularFreeHandler(
@@ -713,11 +710,9 @@ class MutatorThreadSweeper final : private HeapVisitor<MutatorThreadSweeper> {
   }
 
   bool VisitNormalPage(NormalPage& page) {
-    if (ShouldDiscardMemory(free_memory_handling_)) {
-      page.ResetDiscardedMemory();
-    }
     auto result =
-        ShouldDiscardMemory(free_memory_handling_)
+        ShouldDiscardMemory(free_memory_handling_,
+                            page.heap().decommit_free_memory())
             ? SweepNormalPage<
                   InlinedFinalizationBuilder<DiscardingFreeHandler>>(
                   &page, *platform_->GetPageAllocator(), sticky_bits_)
@@ -831,11 +826,9 @@ class ConcurrentSweepTask final : public cppgc::JobTask,
   }
 
   bool VisitNormalPage(NormalPage& page) {
-    if (ShouldDiscardMemory(free_memory_handling_)) {
-      page.ResetDiscardedMemory();
-    }
     SweepingState::SweptPageState sweep_result =
-        ShouldDiscardMemory(free_memory_handling_)
+        ShouldDiscardMemory(free_memory_handling_,
+                            page.heap().decommit_free_memory())
             ? SweepNormalPage<
                   DeferredFinalizationBuilder<DiscardingFreeHandler>>(
                   &page, page_allocator_, sticky_bits_)
@@ -1012,11 +1005,6 @@ class Sweeper::SweeperImpl final {
         foreground_task_runner_.reset();
         low_priority_foreground_task_runner_.reset();
       }
-    }
-
-    if (ShouldDiscardMemory(config_.free_memory_handling)) {
-      // The discarded counter will be recomputed.
-      heap_.heap()->stats_collector()->ResetDiscardedMemory();
     }
 
     PrepareForSweepVisitor(heap_.heap(), &space_states_, &empty_normal_pages_,

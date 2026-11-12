@@ -545,6 +545,7 @@ CppHeap::CppHeap(
   // garbage collections.
   no_gc_scope_++;
   stats_collector()->RegisterObserver(this);
+  set_decommit_free_memory(v8_flags.cppgc_decommit_free_memory);
 #ifdef V8_ENABLE_ALLOCATION_TIMEOUT
   object_allocator().UpdateAllocationTimeout();
 #endif  // V8_ENABLE_ALLOCATION_TIMEOUT
@@ -797,6 +798,7 @@ void CppHeap::UpdateGCCapabilitiesFromFlags() {
                v8_flags.single_threaded_gc
                    ? CppHeap::SweepingType::kIncremental
                    : CppHeap::SweepingType::kIncrementalAndConcurrent);
+  set_decommit_free_memory(v8_flags.cppgc_decommit_free_memory);
 }
 
 void CppHeap::InitializeMarking(
@@ -1095,6 +1097,7 @@ void CppHeap::CompactAndSweep() {
                   kRetainMemory};
     DCHECK_IMPLIES(!isolate_,
                    SweepingType::kAtomic == sweeping_config.sweeping_type);
+    set_decommit_free_memory(v8_flags.cppgc_decommit_free_memory);
     sweeper().Start(sweeping_config);
   }
 

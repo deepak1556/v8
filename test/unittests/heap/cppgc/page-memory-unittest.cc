@@ -176,6 +176,33 @@ TEST(PageBackendPoolTest, AddTake) {
   EXPECT_EQ(writable_base1, writable_base2);
 }
 
+TEST(PageBackendPoolTest, AddTakeDecommitted) {
+  v8::base::PageAllocator allocator;
+  PageBackend backend(allocator, allocator);
+  auto& pool = backend.page_pool();
+  auto& raw_pool = pool.get_raw_pool_for_testing();
+
+  auto* writable_base1 = backend.TryAllocateNormalPageMemory();
+  ASSERT_NE(nullptr, writable_base1);
+  const size_t commit_page_size = allocator.CommitPageSize();
+  // Decommit the last system page. The page header at the start of the page
+  // may span more than one system page and must stay committed, as it is
+  // zeroed when the page is returned to the pool.
+  ASSERT_TRUE(allocator.DecommitPages(
+      writable_base1 + kPageSize - commit_page_size, commit_page_size));
+
+  backend.FreeNormalPageMemory(writable_base1,
+                               /*has_decommitted_memory=*/true);
+  ASSERT_FALSE(raw_pool.empty());
+  EXPECT_TRUE(raw_pool[0]->has_decommitted_memory());
+
+  auto* writable_base2 = backend.TryAllocateNormalPageMemory();
+  EXPECT_EQ(writable_base1, writable_base2);
+  // Recommitting in Take() must make the entire page writable again.
+  std::memset(writable_base2, 0, kPageSize);
+  backend.FreeNormalPageMemory(writable_base2);
+}
+
 TEST(PageBackendPoolTest, AddTakeWithReleasePooledPagesInBetween) {
   v8::base::PageAllocator allocator;
   PageBackend backend(allocator, allocator);

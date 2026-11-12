@@ -11,6 +11,7 @@
 #include "src/base/hashing.h"
 #include "src/base/iterator.h"
 #include "src/base/macros.h"
+#include "src/heap/base/active-system-pages.h"
 #include "src/heap/base/basic-slot-set.h"
 #include "src/heap/cppgc-internal/globals.h"
 #include "src/heap/cppgc-internal/heap-config.h"
@@ -103,6 +104,10 @@ class V8_EXPORT_PRIVATE BasePage : public BasePageHandle {
   void IncrementDiscardedMemory(size_t value) {
     DCHECK_GE(discarded_memory_ + value, discarded_memory_);
     discarded_memory_ += value;
+  }
+  void DecrementDiscardedMemory(size_t value) {
+    DCHECK_GE(discarded_memory_, value);
+    discarded_memory_ -= value;
   }
   void ResetDiscardedMemory() { discarded_memory_ = 0; }
   size_t discarded_memory() const { return discarded_memory_; }
@@ -257,12 +262,16 @@ class V8_EXPORT_PRIVATE NormalPage final : public BasePage {
     return object_start_bitmap_;
   }
 
+  void DiscardOrDecommitPages(Address begin, size_t size);
+  void RecommitMemory(Address begin, size_t size);
+
  private:
   NormalPage(HeapBase& heap, BaseSpace& space);
   ~NormalPage() = default;
 
   size_t allocated_bytes_at_last_gc_ = 0;
   mutable ObjectStartBitmap object_start_bitmap_;
+  ::heap::base::ActiveSystemPages active_system_pages_;
 };
 
 class V8_EXPORT_PRIVATE LargePage final : public BasePage {

@@ -61,6 +61,11 @@ class V8_EXPORT_PRIVATE PageMemoryRegion final {
 
   PageAllocator& allocator() const { return allocator_; }
 
+  bool has_decommitted_memory() const { return has_decommitted_memory_; }
+  void set_has_decommitted_memory(bool value) {
+    has_decommitted_memory_ = value;
+  }
+
   // Disallow copy/move.
   PageMemoryRegion(const PageMemoryRegion&) = delete;
   PageMemoryRegion& operator=(const PageMemoryRegion&) = delete;
@@ -70,6 +75,7 @@ class V8_EXPORT_PRIVATE PageMemoryRegion final {
  private:
   PageAllocator& allocator_;
   const MemoryRegion reserved_region_;
+  bool has_decommitted_memory_ = false;
 };
 
 // A PageMemoryRegionTree is a binary search tree of PageMemoryRegions sorted
@@ -133,7 +139,8 @@ class V8_EXPORT_PRIVATE PageBackend final {
 
   // Returns normal page memory back to the backend. Expects the
   // |writeable_base| returned by |AllocateNormalMemory()|.
-  void FreeNormalPageMemory(Address writeable_base);
+  void FreeNormalPageMemory(Address writeable_base,
+                            bool has_decommitted_memory = false);
 
   // Allocates a large page from the backend.
   //
