@@ -247,6 +247,61 @@ class BasicSlotSet {
     return (bucket->LoadCell(cell_index) & (1u << bit_index)) != 0;
   }
 
+  // Non-atomically migrates any recorded slot bits in `[start_offset,
+  // end_offset)` from this source set into `dst_set` shifted by
+  // `(slot_offset - start_offset) + dst_start_offset`, clearing them on this
+  // source set. Used during pause-time object evacuation when a candidate
+  // object moves to a destination page.
+  void MigrateSlotsInRange(size_t start_offset, size_t end_offset,
+                           BasicSlotSet* dst_set, size_t dst_start_offset) {
+    DCHECK_LE(start_offset, end_offset);
+    if (start_offset == end_offset) return;
+    DCHECK(IsAligned(start_offset, SlotGranularity));
+    DCHECK(IsAligned(end_offset, SlotGranularity));
+    DCHECK(IsAligned(dst_start_offset, SlotGranularity));
+
+    size_t start_bucket;
+    int start_cell, start_bit;
+    SlotToIndices(start_offset, &start_bucket, &start_cell, &start_bit);
+    size_t end_bucket;
+    int end_cell, end_bit;
+    SlotToIndices(end_offset - SlotGranularity, &end_bucket, &end_cell,
+                  &end_bit);
+
+    for (size_t b = start_bucket; b <= end_bucket; ++b) {
+      Bucket* bucket = LoadBucket<AccessMode::NON_ATOMIC>(b);
+      if (bucket == nullptr) continue;
+      const int first_cell = (b == start_bucket) ? start_cell : 0;
+      const int last_cell =
+          (b == end_bucket) ? end_cell : (kCellsPerBucket - 1);
+      for (int c = first_cell; c <= last_cell; ++c) {
+        uint32_t mask = ~0u;
+        if (b == start_bucket && c == start_cell) {
+          mask &= ~((1u << start_bit) - 1u);
+        }
+        if (b == end_bucket && c == end_cell && end_bit < kBitsPerCell - 1) {
+          mask &= (1u << (end_bit + 1)) - 1u;
+        }
+        uint32_t bits =
+            bucket->template LoadCell<AccessMode::NON_ATOMIC>(c) & mask;
+        if (bits == 0) continue;
+        bucket->template ClearCellBits<AccessMode::NON_ATOMIC>(c, bits);
+        const size_t cell_base_offset =
+            OffsetForBucket(b) +
+            static_cast<size_t>(c) * kBitsPerCell * SlotGranularity;
+        while (bits != 0) {
+          const int bit = v8::base::bits::CountTrailingZeros(bits);
+          const size_t src_slot_offset =
+              cell_base_offset + static_cast<size_t>(bit) * SlotGranularity;
+          const size_t dst_slot_offset =
+              dst_start_offset + (src_slot_offset - start_offset);
+          dst_set->template Insert<AccessMode::NON_ATOMIC>(dst_slot_offset);
+          bits &= (bits - 1u);
+        }
+      }
+    }
+  }
+
   // Iterate over all slots in the set and for each slot invoke the callback.
   // If the callback returns REMOVE_SLOT then the slot is removed from the set.
   // Returns the new number of slots.

@@ -10,6 +10,7 @@
 #include "src/base/macros.h"
 #include "src/common/globals.h"
 #include "src/heap/allocation-result.h"
+#include "src/heap/base/free-list-category-cache.h"
 #include "src/objects/free-space.h"
 #include "src/objects/map.h"
 #include "src/utils/utils.h"
@@ -372,48 +373,31 @@ class V8_EXPORT_PRIVATE FreeListManyCached : public FreeListMany {
   void RemoveCategory(FreeListCategory* category) override;
 
  protected:
-  // Updates the cache after adding something in the category |cat|.
   void UpdateCacheAfterAddition(FreeListCategoryType cat) {
-    for (int i = cat; i >= kFirstCategory && next_nonempty_category[i] > cat;
-         i--) {
-      next_nonempty_category[i] = cat;
-    }
+    category_cache_.UpdateAfterAddition(cat);
   }
 
-  // Updates the cache after emptying category |cat|.
   void UpdateCacheAfterRemoval(FreeListCategoryType cat) {
-    for (int i = cat; i >= kFirstCategory && next_nonempty_category[i] == cat;
-         i--) {
-      next_nonempty_category[i] = next_nonempty_category[cat + 1];
-    }
+    category_cache_.UpdateAfterRemoval(cat);
+  }
+
+  FreeListCategoryType FirstNonEmptyCategory(
+      FreeListCategoryType min_cat) const {
+    return category_cache_.FirstNonEmpty(min_cat);
   }
 
 #ifdef DEBUG
   void CheckCacheIntegrity() {
-    for (int i = 0; i <= last_category_; i++) {
-      DCHECK(next_nonempty_category[i] == last_category_ + 1 ||
-             categories_[next_nonempty_category[i]] != nullptr);
-      for (int j = i; j < next_nonempty_category[i]; j++) {
-        DCHECK(categories_[j] == nullptr);
-      }
-    }
+    category_cache_.CheckIntegrity(last_category_, [this](int cat) {
+      return categories_[cat] == nullptr;
+    });
   }
 #endif
 
-  // The cache is overallocated by one so that the last element is always
-  // defined, and when updating the cache, we can always use cache[i+1] as long
-  // as i is < kNumberOfCategories.
-  int next_nonempty_category[kNumberOfCategories + 1];
+  ::heap::base::FreeListCategoryCache<kNumberOfCategories> category_cache_;
 
  private:
-  void ResetCache() {
-    for (int i = 0; i < kNumberOfCategories; i++) {
-      next_nonempty_category[i] = kNumberOfCategories;
-    }
-    // Setting the after-last element as well, as explained in the cache's
-    // declaration.
-    next_nonempty_category[kNumberOfCategories] = kNumberOfCategories;
-  }
+  void ResetCache() { category_cache_.Reset(); }
 };
 
 // Same as FreeListManyCached but uses a fast path.

@@ -348,8 +348,8 @@ Tagged<FreeSpace> FreeListManyCached::Allocate(const Heap* heap,
 
   Tagged<FreeSpace> node;
   FreeListCategoryType type = SelectFreeListCategoryType(size_in_bytes);
-  type = next_nonempty_category[type];
-  for (; type < last_category_; type = next_nonempty_category[type + 1]) {
+  type = FirstNonEmptyCategory(type);
+  for (; type < last_category_; type = FirstNonEmptyCategory(type + 1)) {
     node = TryFindNodeIn(type, size_in_bytes, node_size);
     if (!node.is_null()) break;
   }
@@ -391,8 +391,8 @@ Tagged<FreeSpace> FreeListManyCachedFastPathBase::Allocate(
   FreeListCategoryType first_category =
       SelectFastAllocationFreeListCategoryType(size_in_bytes);
   FreeListCategoryType type = first_category;
-  for (type = next_nonempty_category[type]; type <= last_category_;
-       type = next_nonempty_category[type + 1]) {
+  for (type = FirstNonEmptyCategory(type); type <= last_category_;
+       type = FirstNonEmptyCategory(type + 1)) {
     node = TryFindNodeIn(type, size_in_bytes, node_size);
     if (!node.is_null()) break;
   }
@@ -402,9 +402,9 @@ Tagged<FreeSpace> FreeListManyCachedFastPathBase::Allocate(
     if (node.is_null()) {
       if (size_in_bytes <= kTinyObjectMaxSize) {
         DCHECK_EQ(kFastPathFirstCategory, first_category);
-        for (type = next_nonempty_category[kFastPathFallBackTiny];
+        for (type = FirstNonEmptyCategory(kFastPathFallBackTiny);
              type < kFastPathFirstCategory;
-             type = next_nonempty_category[type + 1]) {
+             type = FirstNonEmptyCategory(type + 1)) {
           node = TryFindNodeIn(type, size_in_bytes, node_size);
           if (!node.is_null()) break;
         }
@@ -423,8 +423,8 @@ Tagged<FreeSpace> FreeListManyCachedFastPathBase::Allocate(
   // Finally, search the most precise category
   if (node.is_null()) {
     type = SelectFreeListCategoryType(size_in_bytes);
-    for (type = next_nonempty_category[type]; type < first_category;
-         type = next_nonempty_category[type + 1]) {
+    for (type = FirstNonEmptyCategory(type); type < first_category;
+         type = FirstNonEmptyCategory(type + 1)) {
       node = TryFindNodeIn(type, size_in_bytes, node_size);
       if (!node.is_null()) break;
     }

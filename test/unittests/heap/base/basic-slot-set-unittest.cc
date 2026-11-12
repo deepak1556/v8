@@ -6,7 +6,10 @@
 
 #include <limits>
 #include <map>
+#include <vector>
 
+#include "src/heap/base/free-list-category-cache.h"
+#include "src/heap/base/typed-slot-set.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace heap {
@@ -192,6 +195,105 @@ TEST(BasicSlotSet, RemoveRange) {
     }
   }
   TestSlotSet::Delete(set);
+}
+
+TEST(BasicSlotSet, MigrateSlotsInRangeCrossesCellsAndBuckets) {
+  TestSlotSet* src = TestSlotSet::Allocate(kBucketsTestPage);
+  TestSlotSet* dst = TestSlotSet::Allocate(kBucketsTestPage);
+
+  const size_t before = 31 * kTestGranularity;
+  const size_t range_start = 32 * kTestGranularity;
+  const size_t mid_cell = 45 * kTestGranularity;
+  const size_t next_bucket = 1030 * kTestGranularity;
+  const size_t range_end = 1040 * kTestGranularity;
+  const size_t after = range_end;
+  const size_t dst_start = 16 * kTestGranularity;
+
+  src->Insert<TestSlotSet::AccessMode::NON_ATOMIC>(before);
+  src->Insert<TestSlotSet::AccessMode::NON_ATOMIC>(range_start);
+  src->Insert<TestSlotSet::AccessMode::NON_ATOMIC>(mid_cell);
+  src->Insert<TestSlotSet::AccessMode::NON_ATOMIC>(next_bucket);
+  src->Insert<TestSlotSet::AccessMode::NON_ATOMIC>(after);
+
+  src->MigrateSlotsInRange(range_start, range_end, dst, dst_start);
+
+  EXPECT_TRUE(src->Lookup(before));
+  EXPECT_FALSE(src->Lookup(range_start));
+  EXPECT_FALSE(src->Lookup(mid_cell));
+  EXPECT_FALSE(src->Lookup(next_bucket));
+  EXPECT_TRUE(src->Lookup(after));
+
+  EXPECT_TRUE(dst->Lookup(dst_start));
+  EXPECT_TRUE(dst->Lookup(dst_start + (mid_cell - range_start)));
+  EXPECT_TRUE(dst->Lookup(dst_start + (next_bucket - range_start)));
+  EXPECT_FALSE(dst->Lookup(dst_start + (after - range_start)));
+
+  TestSlotSet::Delete(src);
+  TestSlotSet::Delete(dst);
+}
+
+namespace {
+enum class TestTypedSlotKind : uint8_t {
+  kKindA = 0,
+  kKindB = 1,
+  kCleared = 2,
+  kLast = kCleared,
+};
+}  // namespace
+
+TEST(BasicSlotSet, TypedSlotSetMigrateSlotsInRange) {
+  constexpr uintptr_t kSrcBase = 0x10000;
+  constexpr uintptr_t kDstBase = 0x20000;
+  BasicTypedSlotSet<TestTypedSlotKind> src(kSrcBase);
+  BasicTypedSlotSet<TestTypedSlotKind> dst(kDstBase);
+
+  src.Insert(TestTypedSlotKind::kKindA, 64);
+  src.Insert(TestTypedSlotKind::kKindB, 128);
+  src.Insert(TestTypedSlotKind::kKindA, 160);
+  src.Insert(TestTypedSlotKind::kKindB, 256);
+
+  src.MigrateSlotsInRange(120, 200, &dst, 32);
+
+  std::vector<std::pair<TestTypedSlotKind, uintptr_t>> remaining_src;
+  src.Iterate(
+      [&](TestTypedSlotKind kind, uintptr_t addr) {
+        remaining_src.emplace_back(kind, addr - kSrcBase);
+        return KEEP_SLOT;
+      },
+      BasicTypedSlotSet<TestTypedSlotKind>::FREE_EMPTY_CHUNKS);
+  ASSERT_EQ(2u, remaining_src.size());
+  EXPECT_EQ(64u, remaining_src[0].second);
+  EXPECT_EQ(256u, remaining_src[1].second);
+
+  std::vector<std::pair<TestTypedSlotKind, uintptr_t>> migrated_dst;
+  dst.Iterate(
+      [&](TestTypedSlotKind kind, uintptr_t addr) {
+        migrated_dst.emplace_back(kind, addr - kDstBase);
+        return KEEP_SLOT;
+      },
+      BasicTypedSlotSet<TestTypedSlotKind>::FREE_EMPTY_CHUNKS);
+  ASSERT_EQ(2u, migrated_dst.size());
+  EXPECT_EQ(TestTypedSlotKind::kKindB, migrated_dst[0].first);
+  EXPECT_EQ(40u, migrated_dst[0].second);
+  EXPECT_EQ(TestTypedSlotKind::kKindA, migrated_dst[1].first);
+  EXPECT_EQ(72u, migrated_dst[1].second);
+}
+
+TEST(BasicSlotSet, FreeListCategoryCacheUpdatesAndResets) {
+  FreeListCategoryCache<16> cache;
+  EXPECT_EQ(16, cache.FirstNonEmpty(0));
+
+  cache.UpdateAfterAddition(11);
+  cache.UpdateAfterAddition(4);
+  EXPECT_EQ(4, cache.FirstNonEmpty(0));
+  EXPECT_EQ(4, cache.FirstNonEmpty(4));
+  EXPECT_EQ(11, cache.FirstNonEmpty(5));
+  EXPECT_EQ(16, cache.FirstNonEmpty(12));
+
+  cache.UpdateAfterRemoval(4);
+  EXPECT_EQ(11, cache.FirstNonEmpty(0));
+  cache.UpdateAfterRemoval(11);
+  EXPECT_EQ(16, cache.FirstNonEmpty(0));
 }
 
 }  // namespace base
