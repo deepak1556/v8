@@ -13,6 +13,7 @@
 #include "src/heap/cppgc-internal/heap-page.h"
 #include "src/heap/cppgc-internal/marker.h"
 #include "src/heap/cppgc-internal/stats-collector.h"
+#include "src/heap/cppgc-internal/sweeper.h"
 #include "test/unittests/heap/cppgc/tests.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -249,6 +250,65 @@ TEST_F(CompactorTest, OnStackSlotShouldBeFiltered) {
       MakeGarbageCollected<CompactableGCed>(GetAllocationHandle());
   heap()->marker()->Visitor().RegisterMovableReference(&compactable_object);
   EndGC();
+}
+
+TEST_F(CompactorTest, CompactIntoDecommittedMemory) {
+  if (!Sweeper::CanDiscardMemory(true)) return;
+  heap()->set_decommit_free_memory(true);
+
+  static constexpr size_t kNumObjects = 2000;
+  static constexpr size_t kFirstLiveTailObject = 1400;
+  Persistent<CompactableHolder<kNumObjects>> holder =
+      MakeGarbageCollected<CompactableHolder<kNumObjects>>(
+          GetAllocationHandle(), GetAllocationHandle());
+  auto* page = NormalPage::FromPayload(holder->objects[0].Get());
+  ASSERT_EQ(page, NormalPage::FromPayload(holder->objects[kNumObjects - 1]));
+  for (size_t i = 0; i < kNumObjects; ++i) holder->objects[i]->id = i;
+  for (size_t i = 1; i < kFirstLiveTailObject; ++i) {
+    holder->objects[i] = nullptr;
+  }
+
+  heap()->CollectGarbage({CollectionType::kMajor, StackState::kNoHeapPointers,
+                          GCConfig::MarkingType::kAtomic,
+                          GCConfig::SweepingType::kAtomic,
+                          GCConfig::FreeMemoryHandling::kReleaseMemory});
+  ASSERT_GT(page->discarded_memory(), 0u);
+
+  StartGC();
+  EndGC();
+  // The live tail objects were compacted into the previously decommitted hole
+  // at the start of the page, and the newly vacated tail of the page is now
+  // decommitted.
+  EXPECT_GT(page->discarded_memory(), 0u);
+  EXPECT_EQ(0u, holder->objects[0]->id);
+  for (size_t i = kFirstLiveTailObject; i < kNumObjects; ++i) {
+    EXPECT_EQ(i, holder->objects[i]->id);
+  }
+}
+
+TEST_F(CompactorTest, MultipleSlotsToSameMovableObject) {
+  static constexpr int kNumObjects = 4;
+  Persistent<CompactableHolder<kNumObjects>> holder =
+      MakeGarbageCollected<CompactableHolder<kNumObjects>>(
+          GetAllocationHandle(), GetAllocationHandle());
+  CompactableGCed* shared_target = holder->objects[3].Get();
+  shared_target->id = 42u;
+  // Point slots 1, 2, and 3 (and an interior slot on object 1) at the same
+  // movable object, while dropping object 0 to force relocation.
+  holder->objects[0] = nullptr;
+  holder->objects[1]->id = 7u;
+  holder->objects[1]->other = shared_target;
+  holder->objects[2] = shared_target;
+
+  StartGC();
+  EndGC();
+
+  ASSERT_NE(nullptr, holder->objects[1].Get());
+  EXPECT_EQ(7u, holder->objects[1]->id);
+  ASSERT_NE(nullptr, holder->objects[2].Get());
+  EXPECT_EQ(holder->objects[2].Get(), holder->objects[3].Get());
+  EXPECT_EQ(holder->objects[2].Get(), holder->objects[1]->other.Get());
+  EXPECT_EQ(42u, holder->objects[2]->id);
 }
 
 }  // namespace internal

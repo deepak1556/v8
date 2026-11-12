@@ -5,6 +5,7 @@
 #include "src/heap/cppgc-internal/heap-page.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstring>
 
@@ -150,6 +151,13 @@ const HeapObjectHeader* BasePage::TryObjectHeaderFromInnerAddress(
     if (normal_page->is_size_class()) {
       const HeapObjectHeader* header = normal_page->CellHeaderFromInnerAddress(
           static_cast<ConstAddress>(address));
+      if (normal_page->discarded_memory() &&
+          (!normal_page->IsAddressOnCommittedSubPage(header) ||
+           !normal_page->IsAddressOnCommittedSubPage(
+               reinterpret_cast<ConstAddress>(header) +
+               sizeof(HeapObjectHeader) - 1))) {
+        return nullptr;
+      }
       return IsFreeCell(header) ? nullptr : header;
     }
 
@@ -374,27 +382,53 @@ void NormalPage::RecommitMemory(Address begin, size_t size) {
   const uintptr_t start_offset =
       reinterpret_cast<uintptr_t>(begin) - page_start;
   const uintptr_t end_offset = start_offset + size;
+  const uint64_t old_bits = active_system_pages_.bits();
   const size_t added_pages =
       active_system_pages_.Add(start_offset, end_offset, page_size_bits);
   if (added_pages == 0) {
     return;
   }
+  uint64_t newly_added = active_system_pages_.bits() & ~old_bits;
   const size_t recommitted_size = added_pages << page_size_bits;
   if (heap().decommit_free_memory()) {
-    const uintptr_t aligned_start =
-        RoundDown(reinterpret_cast<uintptr_t>(begin), commit_page_size);
-    const uintptr_t aligned_end =
-        RoundUp(reinterpret_cast<uintptr_t>(begin + size), commit_page_size);
-    const size_t aligned_size = aligned_end - aligned_start;
-    CHECK(page_allocator.RecommitPages(
-        reinterpret_cast<void*>(aligned_start), aligned_size,
-        v8::PageAllocator::Permission::kReadWrite));
-    CHECK(page_allocator.SetPermissions(
-        reinterpret_cast<void*>(aligned_start), aligned_size,
-        v8::PageAllocator::Permission::kReadWrite));
+    while (newly_added != 0) {
+      const size_t first_bit = std::countr_zero(newly_added);
+      const size_t run_pages = std::countr_one(newly_added >> first_bit);
+      void* run_addr =
+          reinterpret_cast<void*>(page_start + (first_bit << page_size_bits));
+      const size_t run_size = run_pages << page_size_bits;
+      CHECK(page_allocator.RecommitPages(
+          run_addr, run_size, v8::PageAllocator::Permission::kReadWrite));
+      CHECK(page_allocator.SetPermissions(
+          run_addr, run_size, v8::PageAllocator::Permission::kReadWrite));
+#if CPPGC_SHOULD_ZAP_MEMORY
+      SetMemoryInaccessible(run_addr, run_size);
+#endif
+      if (first_bit + run_pages >= 64) {
+        newly_added = 0;
+      } else {
+        newly_added &= ~(((uint64_t{1} << run_pages) - 1) << first_bit);
+      }
+    }
   }
   DecrementDiscardedMemory(recommitted_size);
   heap().stats_collector()->DecrementDiscardedMemory(recommitted_size);
+}
+
+bool NormalPage::IsAddressOnCommittedSubPage(const void* address) const {
+  const uintptr_t page_start = reinterpret_cast<uintptr_t>(this);
+  const uintptr_t addr_uptr = reinterpret_cast<uintptr_t>(address);
+  if (addr_uptr < page_start || addr_uptr >= page_start + kPageSize) {
+    return false;
+  }
+  if (!discarded_memory()) return true;
+  const size_t commit_page_size =
+      heap().platform()->GetPageAllocator()->CommitPageSize();
+  const size_t unit_idx = (addr_uptr - page_start) / commit_page_size;
+  if (unit_idx < ::heap::base::ActiveSystemPages::kMaxPages) {
+    return (active_system_pages_.bits() & (uint64_t{1} << unit_idx)) != 0;
+  }
+  return true;
 }
 
 NormalPage::iterator NormalPage::begin() {

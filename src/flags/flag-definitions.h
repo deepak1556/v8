@@ -410,9 +410,8 @@ DEFINE_EXPERIMENTAL_FEATURE(
 DEFINE_BOOL(icu_timezone_data, true, "get information about timezones from ICU")
 DEFINE_STRING(icu_datetime_compat_lang, "*",
               "limits ICU date time compat changes to the given language")
-DEFINE_BOOL(
-    intl_date_time_pattern_generator_cache_eviction, false,
-    "enable 9-entry cache eviction in DateTimePatternGeneratorCache")
+DEFINE_BOOL(intl_date_time_pattern_generator_cache_eviction, false,
+            "enable 9-entry cache eviction in DateTimePatternGeneratorCache")
 DEFINE_BOOL(use_icu4x_normalizer, false, "use ICU4X normalizer")
 #ifdef V8_ENABLE_ECMA402_ICU4X
 DEFINE_BOOL(ecma402_icu4x_plural_rules, false, "use ICU4X for Intl.PluralRules")
@@ -600,7 +599,8 @@ DEFINE_BOOL(
 // way, we still gather *some* feedback before compiling optimized code.
 DEFINE_BOOL(stress_maglev, false, "trigger maglev compilation earlier")
 DEFINE_IMPLICATION(stress_maglev, maglev)
-DEFINE_WEAK_VALUE_IMPLICATION(stress_maglev, invocation_count_for_maglev, 4)
+DEFINE_WEAK_VALUE_IMPLICATION(stress_maglev,
+  invocation_count_for_maglev , 4 )
 
 #else
 DEFINE_BOOL_READONLY(maglev, false, "enable the maglev optimizing compiler")
@@ -718,9 +718,8 @@ DEFINE_WEAK_VALUE_IMPLICATION(maglev_as_top_tier,
                               max_maglev_inlined_bytecode_size, 460)
 DEFINE_WEAK_VALUE_IMPLICATION(maglev_as_top_tier, min_maglev_inlining_frequency,
                               0.10)
-DEFINE_WEAK_VALUE_IMPLICATION(maglev_as_top_tier,
-                              max_maglev_inlined_bytecode_size_small_total,
-                              30000)
+DEFINE_WEAK_VALUE_IMPLICATION(
+    maglev_as_top_tier, max_maglev_inlined_bytecode_size_small_total, 30000)
 
 DEFINE_BOOL(maglev_reuse_stack_slots, true,
             "reuse stack slots in the maglev optimizing compiler")
@@ -827,7 +826,6 @@ DEFINE_BOOL(maglev_function_context_specialization, true,
 DEFINE_WEAK_IMPLICATION(future, flush_baseline_code)
 #endif
 
-
 #ifdef V8_TARGET_ARCH_64_BIT
 DEFINE_BOOL(additive_safe_int_feedback, true,
             "Record AdditiveSafeInteger feedback")
@@ -917,13 +915,16 @@ DEFINE_UINT(max_opt, 999,
             "2 == maglev, 3 == turbofan")
 
 #ifdef V8_ENABLE_TURBOFAN
-DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 3, turbofan, false)
+DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 3,
+  turbofan, false)
 #endif  // V8_ENABLE_TURBOFAN
 #ifdef V8_ENABLE_MAGLEV
-DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 2, maglev, false)
+DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 2,
+  maglev, false)
 #endif  // V8_ENABLE_MAGLEV
 #ifdef V8_ENABLE_SPARKPLUG
-DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 1, sparkplug, false)
+DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 1,
+  sparkplug, false)
 #endif  // V8_ENABLE_SPARKPLUG
 
 // Flags to override efficiency and battery saver mode settings for debugging
@@ -1248,7 +1249,6 @@ DEFINE_DEVELOPER_FLAG(trace_track_allocation_sites,
                       "trace the tracking of allocation sites")
 DEFINE_DEVELOPER_FLAG(trace_migration, "trace object migration")
 DEFINE_DEVELOPER_FLAG(trace_generalization, "trace map generalization")
-
 
 // Flags for Sparkplug
 #undef FLAG
@@ -1798,8 +1798,9 @@ DEFINE_NEG_IMPLICATION(turbofan && !turbolev, array_destructure_bytecode)
 
 DEFINE_DEVELOPER_FLAG(print_turbolev_frontend,
                       "print Turbolev frontend (Maglev graphs)")
-DEFINE_STRING(turbolev_phase_filter, "*",
-              "filter for turbolev phases (comma-separated list of phase names)")
+DEFINE_STRING(
+    turbolev_phase_filter, "*",
+    "filter for turbolev phases (comma-separated list of phase names)")
 
 DEFINE_DEVELOPER_FLAG(print_turbolev_inline_functions,
                       "print Turbolev inline functions")
@@ -1982,9 +1983,9 @@ FOREACH_EXPERIMENTAL_FEATURE_FLAG(DECL_EXPERIMENTAL_JS_FLAG,
   DEFINE_EXPERIMENTAL_FEATURE(feature_name, "enable " description " for JS") \
   DEFINE_IMPLICATION(experimental_fuzzing, feature_name)
 #ifdef V8_ENABLE_WEBASSEMBLY
-#define DECL_PRE_STAGED_WASM_FLAG(feature_name, description)       \
-  DEFINE_EXPERIMENTAL_FEATURE(wasm_##feature_name,                 \
-                              "enable " description " for Wasm")   \
+#define DECL_PRE_STAGED_WASM_FLAG(feature_name, description)     \
+  DEFINE_EXPERIMENTAL_FEATURE(wasm_##feature_name,               \
+                              "enable " description " for Wasm") \
   DEFINE_IMPLICATION(experimental_fuzzing, wasm_##feature_name)
 #else
 #define DECL_PRE_STAGED_WASM_FLAG(feature_name, description)
@@ -2049,7 +2050,8 @@ DEFINE_UNSAFE_FLAG(wasm_unsafe_fast_api_wrapper,
                    "allow use of the unsafe fast API wrapper")
 DEFINE_INT(wasm_num_compilation_tasks, 128,
            "maximum number of parallel compilation tasks for wasm")
-DEFINE_VALUE_IMPLICATION(single_threaded, wasm_num_compilation_tasks, 0)
+DEFINE_VALUE_IMPLICATION(single_threaded,
+  wasm_num_compilation_tasks, 0)
 DEFINE_DEBUG_BOOL(trace_wasm_native_heap, false,
                   "trace wasm native heap events")
 DEFINE_DEVELOPER_FLAG(
@@ -2552,7 +2554,7 @@ DEFINE_INT(random_gc_interval, 0,
            "gc_interval.")
 DEFINE_INT(gc_interval, -1, "garbage collect after <n> allocations")
 DEFINE_INT(cppgc_random_gc_interval, 0,
-            "Collect garbage after random(0, X) cppgc allocations.")
+           "Collect garbage after random(0, X) cppgc allocations.")
 DEFINE_MIN_VALUE_IMPLICATION(cppgc_random_gc_interval, 0)
 
 #ifdef V8_ENABLE_ALLOCATION_TIMEOUT
@@ -2634,7 +2636,7 @@ DEFINE_IMPLICATION(cppgc_young_generation, minor_ms)
 // optimization.
 DEFINE_NEG_IMPLICATION(cppgc_young_generation, reclaim_unmodified_wrappers)
 DEFINE_BOOL(optimize_gc_for_battery, false, "optimize GC for battery")
-DEFINE_BOOL(cppgc_decommit_free_memory, false,
+DEFINE_BOOL(cppgc_decommit_free_memory, true,
             "decommit free memory on cppgc pages during memory reducing sweeps")
 #if defined(V8_ATOMIC_OBJECT_FIELD_WRITES)
 DEFINE_BOOL(concurrent_marking, true, "use concurrent marking")
@@ -3073,7 +3075,6 @@ DEFINE_BOOL(
     "After deserializing code cache data on a background thread, merge it into "
     "an existing Script if one is found in the Isolate compilation cache")
 DEFINE_BOOL(verify_code_merge, false, "Verify scope infos after merge")
-
 
 // bootstrapper.cc
 DEFINE_BOOL(expose_gc, false, "expose gc extension")

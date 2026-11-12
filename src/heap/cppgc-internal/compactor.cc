@@ -4,12 +4,14 @@
 
 #include "src/heap/cppgc-internal/compactor.h"
 
+#include <algorithm>
 #include <map>
 #include <numeric>
 #include <unordered_map>
 
 #include "absl/container/flat_hash_set.h"
 #include "include/cppgc/macros.h"
+#include "src/base/small-vector.h"
 #include "src/heap/cppgc-internal/compaction-worklists.h"
 #include "src/heap/cppgc-internal/globals.h"
 #include "src/heap/cppgc-internal/heap-base.h"
@@ -17,8 +19,10 @@
 #include "src/heap/cppgc-internal/heap-space.h"
 #include "src/heap/cppgc-internal/memory.h"
 #include "src/heap/cppgc-internal/object-poisoner.h"
+#include "src/heap/cppgc-internal/platform.h"
 #include "src/heap/cppgc-internal/raw-heap.h"
 #include "src/heap/cppgc-internal/stats-collector.h"
+#include "src/heap/cppgc-internal/sweeper.h"
 
 namespace cppgc {
 namespace internal {
@@ -58,10 +62,12 @@ class MovableReferences final {
  private:
   HeapBase& heap_;
 
-  // Map from movable reference (value) to its slot. Upon moving an object its
-  // slot pointing to it requires updating. Movable reference should currently
-  // have only a single movable reference to them registered.
-  std::unordered_map<MovableReference, MovableReference*> movable_references_;
+  // Map from movable reference (value) to its registered slots. Uses a
+  // 1-element inline SmallVector so single-owner backings incur zero extra
+  // heap allocations while supporting shared/multi-slot movable objects.
+  std::unordered_map<MovableReference,
+                     v8::base::SmallVector<MovableReference*, 1>>
+      movable_references_;
 
   // Map of interior slots to their final location. Needs to be an ordered map
   // as it is used to walk through slots starting at a given memory address.
@@ -116,15 +122,13 @@ void MovableReferences::AddOrFilter(MovableReference* slot) {
       value_page->ObjectHeaderFromInnerAddress(value);
   CHECK(value_header.IsMarked());
 
-  // Slots may have been recorded already but must point to the same value.
-  auto reference_it = movable_references_.find(value);
-  if (V8_UNLIKELY(reference_it != movable_references_.end())) {
-    CHECK_EQ(slot, reference_it->second);
+  // Multiple slots may point to the same movable object; deduplicate identical
+  // slot registrations.
+  auto& slots = movable_references_[value];
+  if (V8_UNLIKELY(std::find(slots.begin(), slots.end(), slot) != slots.end())) {
     return;
   }
-
-  // Add regular movable reference.
-  movable_references_.emplace(value, slot);
+  slots.push_back(slot);
 
   // Check whether the slot itself resides on a page that is compacted.
   if (V8_LIKELY(!slot_page->space().is_compactable())) return;
@@ -169,31 +173,33 @@ void MovableReferences::Relocate(Address from, Address to,
     return;
   }
 
-  // If the object is referenced by a slot that is contained on a compacted
-  // area itself, check whether it can be updated already.
-  MovableReference* slot = it->second;
-  auto interior_it = interior_movable_references_.find(slot);
-  if (interior_it != interior_movable_references_.end()) {
-    MovableReference* slot_location =
-        reinterpret_cast<MovableReference*>(interior_it->second);
-    if (!slot_location) {
-      interior_it->second = to;
+  // Update every slot referencing the moved object, handling slots that reside
+  // inside another compacted object via `interior_movable_references_`.
+  for (MovableReference* slot : it->second) {
+    auto interior_it = interior_movable_references_.find(slot);
+    if (interior_it != interior_movable_references_.end()) {
+      MovableReference* slot_location =
+          reinterpret_cast<MovableReference*>(interior_it->second);
+      if (!slot_location) {
+        interior_it->second = to;
 #if DEBUG
-      // Check that the containing object has not been moved yet.
-      auto reverse_it = interior_slot_to_object_.find(slot);
-      DCHECK_NE(interior_slot_to_object_.end(), reverse_it);
-      DCHECK_EQ(moved_objects_.end(), moved_objects_.find(reverse_it->second));
+        // Check that the containing object has not been moved yet.
+        auto reverse_it = interior_slot_to_object_.find(slot);
+        DCHECK_NE(interior_slot_to_object_.end(), reverse_it);
+        DCHECK_EQ(moved_objects_.end(),
+                  moved_objects_.find(reverse_it->second));
 #endif  // DEBUG
-    } else {
-      slot = slot_location;
+      } else {
+        slot = slot_location;
+      }
     }
+
+    // Compaction is atomic so slot should not be updated during compaction.
+    DCHECK_EQ(from, *slot);
+
+    // Update the slot's new value.
+    *slot = to;
   }
-
-  // Compaction is atomic so slot should not be updated during compaction.
-  DCHECK_EQ(from, *slot);
-
-  // Update the slots new value.
-  *slot = to;
 }
 
 void MovableReferences::RelocateInteriorReferences(Address from, Address to,
@@ -317,6 +323,7 @@ class CompactionState final {
   void ReturnCurrentPageToSpace() {
     DCHECK_EQ(space_, &current_page_->space());
     space_->AddPage(current_page_);
+    current_page_->SetAllocatedBytesAtLastGC(used_bytes_in_current_page_);
     if (used_bytes_in_current_page_ != current_page_->PayloadSize()) {
       // Put the remainder of the page onto the free list.
       size_t freed_size =
@@ -327,8 +334,24 @@ class CompactionState final {
         current_page_->RecommitMemory(free_start, freed_size);
       }
       SetMemoryInaccessible(free_start, freed_size);
-      space_->free_list().Add({free_start, freed_size});
+      const auto unused_range = space_->free_list().AddReturningUnusedBounds(
+          {free_start, freed_size});
       current_page_->object_start_bitmap().SetBit(free_start);
+      HeapBase& heap = current_page_->heap();
+      if (Sweeper::CanDiscardMemory(heap.decommit_free_memory())) {
+        PageAllocator& page_allocator = *heap.platform()->GetPageAllocator();
+        const uintptr_t aligned_begin =
+            RoundUp(reinterpret_cast<uintptr_t>(unused_range.first),
+                    page_allocator.CommitPageSize());
+        const uintptr_t aligned_end =
+            RoundDown(reinterpret_cast<uintptr_t>(unused_range.second),
+                      page_allocator.CommitPageSize());
+        if (aligned_begin < aligned_end) {
+          current_page_->DiscardOrDecommitPages(
+              reinterpret_cast<Address>(aligned_begin),
+              aligned_end - aligned_begin);
+        }
+      }
     }
   }
 
@@ -345,6 +368,9 @@ class CompactionState final {
 
 void CompactPage(NormalPage* page, CompactionState& compaction_state,
                  StickyBits sticky_bits) {
+  if (page->discarded_memory()) {
+    page->RecommitMemory(page->PayloadStart(), page->PayloadSize());
+  }
   compaction_state.AddPage(page);
 
   page->object_start_bitmap().Clear();
@@ -451,12 +477,17 @@ void CompactSpace(NormalPageSpace* space, MovableReferences& movable_references,
 }
 
 size_t UpdateHeapResidency(const std::vector<NormalPageSpace*>& spaces) {
-  return std::accumulate(spaces.cbegin(), spaces.cend(), 0u,
-                         [](size_t acc, const NormalPageSpace* space) {
-                           DCHECK(space->is_compactable());
-                           if (!space->size()) return acc;
-                           return acc + space->free_list().Size();
-                         });
+  return std::accumulate(
+      spaces.cbegin(), spaces.cend(), 0u,
+      [](size_t acc, const NormalPageSpace* space) {
+        DCHECK(space->is_compactable());
+        if (!space->size()) return acc;
+        // Include multi-page capacity when pages were newly expanded during a
+        // burst and have not yet been swept into `free_list()`.
+        const size_t multi_page_bytes =
+            (space->size() > 1) ? (space->size() - 1) * kPageSize : 0u;
+        return acc + std::max(space->free_list().Size(), multi_page_bytes);
+      });
 }
 
 }  // namespace

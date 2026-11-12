@@ -323,6 +323,10 @@ class V8_EXPORT_PRIVATE NormalPage final : public BasePage {
 
   void DiscardOrDecommitPages(Address begin, size_t size);
   void RecommitMemory(Address begin, size_t size);
+  uint64_t active_system_page_bits() const {
+    return active_system_pages_.bits();
+  }
+  bool IsAddressOnCommittedSubPage(const void* address) const;
 
  private:
   NormalPage(HeapBase& heap, NormalPageSpace& space);

@@ -34,16 +34,18 @@ class V8_EXPORT_PRIVATE Sweeper final {
   };
 
   static constexpr bool CanDiscardMemory(bool decommit_free_memory = false) {
-#if defined(V8_OS_WIN)
+#if defined(V8_USE_ADDRESS_SANITIZER)
+    USE(decommit_free_memory);
+    return false;
+#elif defined(V8_OS_WIN)
     // Discarding memory on Windows does not decommit the memory and does not
     // contribute to reduce the memory footprint. On the other hand, these
     // calls become expensive the more memory is allocated in the system and
     // can result in hangs. Thus, we only release memory on Windows when
     // decommitting free memory is enabled.
-    return decommit_free_memory && CheckMemoryIsInaccessibleIsNoop();
+    return decommit_free_memory;
 #else
-    USE(decommit_free_memory);
-    return CheckMemoryIsInaccessibleIsNoop();
+    return decommit_free_memory || CheckMemoryIsInaccessibleIsNoop();
 #endif
   }
 

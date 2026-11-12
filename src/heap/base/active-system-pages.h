@@ -44,6 +44,8 @@ class ActiveSystemPages final {
   // Returns the memory used with the given page size.
   V8_EXPORT_PRIVATE size_t Size(size_t page_size_bits) const;
 
+  uint64_t bits() const { return value_.to_ullong(); }
+
  private:
   using bitset_t = std::bitset<kMaxPages>;
 

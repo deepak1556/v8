@@ -10,6 +10,7 @@
 #include "include/cppgc/heap-statistics.h"
 #include "src/base/macros.h"
 #include "src/base/sanitizer/asan.h"
+#include "src/heap/base/free-list-category-cache.h"
 #include "src/heap/cppgc-internal/globals.h"
 #include "src/heap/cppgc-internal/heap-object-header.h"
 
@@ -49,8 +50,11 @@ class V8_EXPORT_PRIVATE FreeList {
   // for free list management.
   std::pair<Address, Address> AddReturningUnusedBounds(Block);
 
-  // Append other freelist into this.
+  // Append other freelist into this (prepends entries to bucket heads).
   void Append(FreeList&&);
+  // Append other freelist to the tail of each bucket so existing entries are
+  // allocated first.
+  void AppendToTail(FreeList&&);
 
   void Clear();
 
@@ -69,6 +73,8 @@ class V8_EXPORT_PRIVATE FreeList {
   // All |Entry|s in the nth list have size >= 2^n.
   std::array<Entry*, kPageSizeLog2> free_list_heads_;
   std::array<Entry*, kPageSizeLog2> free_list_tails_;
+  ::heap::base::FreeListCategoryCache<static_cast<int>(kPageSizeLog2)>
+      category_cache_;
   size_t biggest_free_list_index_ = 0;
 };
 

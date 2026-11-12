@@ -408,9 +408,12 @@ typename FinalizationBuilder::ResultType SweepNormalPage(
     // Check if this is a free list entry.
     if (header->IsFree<kAtomicAccess>()) {
       SetMemoryInaccessible(header, std::min(kFreeListEntrySize, size));
-      // This prevents memory from being discarded in configurations where
-      // `CheckMemoryIsInaccessibleIsNoop()` is false.
-      CheckMemoryIsInaccessible(header, size);
+      if (!page->discarded_memory()) {
+        // This prevents memory from being discarded in configurations where
+        // `CheckMemoryIsInaccessibleIsNoop()` is false unless decommitted
+        // sub-pages are skipped.
+        CheckMemoryIsInaccessible(header, size);
+      }
       clear_bit_if_coalesced_entry(begin);
       begin += size;
       continue;
@@ -606,20 +609,35 @@ class SweepFinalizer final {
     DCHECK_IMPLIES(space_, space_ == &page->space());
     DCHECK(!page->is_large());
 
-    // Merge freelists without finalizers.
+    // Merge freelists with and without finalizers. Sparse pages (<= 10% live
+    // payload) are appended to the tail of their buckets so mutator allocations
+    // prefer denser pages first and allow sparse pages to drain completely.
+    auto* normal_page = NormalPage::From(page);
+    const bool is_sparse_page =
+        !page_state->is_empty &&
+        (normal_page->marked_bytes() * 10 <= normal_page->PayloadSize());
     FreeList& space_freelist = NormalPageSpace::From(page->space()).free_list();
-    space_freelist.Append(std::move(page_state->cached_free_list));
+    if (is_sparse_page) {
+      space_freelist.AppendToTail(std::move(page_state->cached_free_list));
+    } else {
+      space_freelist.Append(std::move(page_state->cached_free_list));
+    }
 
-    // Merge freelist with finalizers.
     if (!page_state->unfinalized_free_list.empty()) {
+      FreeList unfinalized_target;
+      FreeList& handler_freelist =
+          is_sparse_page ? unfinalized_target : space_freelist;
       std::unique_ptr<FreeHandlerBase> handler =
           ShouldDiscardMemory(free_memory_handling_,
                               page->heap().decommit_free_memory())
               ? std::unique_ptr<FreeHandlerBase>(new DiscardingFreeHandler(
-                    *platform_->GetPageAllocator(), space_freelist, *page))
+                    *platform_->GetPageAllocator(), handler_freelist, *page))
               : std::unique_ptr<FreeHandlerBase>(new RegularFreeHandler(
-                    *platform_->GetPageAllocator(), space_freelist, *page));
+                    *platform_->GetPageAllocator(), handler_freelist, *page));
       handler->FreeFreeList(page_state->unfinalized_free_list);
+      if (is_sparse_page) {
+        space_freelist.AppendToTail(std::move(unfinalized_target));
+      }
     }
 
     largest_consecutive_block_ = std::max(
@@ -1157,14 +1175,17 @@ class Sweeper::SweeperImpl final {
                                 v8::base::TimeDelta max_duration) {
     DCHECK(!space->is_large());
 
-    if (unused_destroyed_normal_pages_ > 0 && page_pool_.pooled() > 0) {
+    SweepingState& space_state = space_states_[space->index()];
+
+    // If this space has no unswept or unfinalized pages of its own, allow
+    // reusing already-destroyed pooled pages before sweeping cross-space empty
+    // pages.
+    if (space_state.swept_unfinalized_pages.IsEmpty() &&
+        space_state.unswept_pages.IsEmpty() &&
+        unused_destroyed_normal_pages_ > 0 && page_pool_.pooled() > 0) {
       unused_destroyed_normal_pages_--;
-      // Destroyed pages during sweeping in tasks are generally sitting in the
-      // page pool and can be reused without increasing memory footprint.
       return false;
     }
-
-    SweepingState& space_state = space_states_[space->index()];
 
     // Bail out if there's no empty pages and no pages to be processed for the
     // specific space at this moment.
@@ -1186,35 +1207,31 @@ class Sweeper::SweeperImpl final {
     SweepFinalizer finalizer(
         platform_, stats_collector_, space, &unused_destroyed_normal_pages_,
         config_.free_memory_handling, EmptyPageHandling::kReturn);
-    // Check empty pages first. Try to just finalize a page without sweeping.
-    // If there's a single page in there we will use it.
-    if (finalizer.FinalizeWithDeadlineAndSize(
-            StatsCollector::kSweepFinalizeEmptyPages, empty_normal_pages_,
-            deadline, size)) {
-      return true;
-    }
     MutatorThreadSweeper sweeper(heap_.heap(), platform_, stats_collector_,
                                  space, &unused_destroyed_normal_pages_,
                                  config_.free_memory_handling,
                                  EmptyPageHandling::kReturn);
-    // Sweeping an empty page in case there's nothing with finalizers. If
-    // there's a single page in there we will use it.
-    if (sweeper.SweepWithDeadlineAndSize(StatsCollector::kSweepEmptyPages,
-                                         empty_normal_pages_, deadline, size)) {
-      return true;
-    }
 
-    // Process unfinalized non-empty pages as finalizing a page is generally
-    // faster than sweeping.
+    // Prefer sweeping non-empty pages already owned by `space` first so
+    // partially occupied pages are reused before expanding onto fresh pages.
     if (finalizer.FinalizeWithDeadlineAndSize(
             StatsCollector::kSweepFinalizeSweptPages, space_state, deadline,
             size)) {
       return true;
     }
-    // Then, if no matching slot is found in the unfinalized pages, search the
-    // unswept page. This also helps out the concurrent sweeper.
     if (sweeper.SweepWithDeadlineAndSize(StatsCollector::kSweepPages,
                                          space_state, deadline, size)) {
+      return true;
+    }
+
+    // Fall back to empty pages when `space` has no suitable free capacity.
+    if (finalizer.FinalizeWithDeadlineAndSize(
+            StatsCollector::kSweepFinalizeEmptyPages, empty_normal_pages_,
+            deadline, size)) {
+      return true;
+    }
+    if (sweeper.SweepWithDeadlineAndSize(StatsCollector::kSweepEmptyPages,
+                                         empty_normal_pages_, deadline, size)) {
       return true;
     }
     return false;

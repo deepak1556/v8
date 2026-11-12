@@ -32,6 +32,7 @@ class FreeList::Entry : public HeapObjectHeader {
   }
 
   Entry* Next() const { return next_; }
+  Entry** NextSlot() { return &next_; }
   void SetNext(Entry* next) { next_ = next; }
 
   void Link(Entry** previous_next) {
@@ -56,6 +57,7 @@ FreeList::FreeList() { Clear(); }
 FreeList::FreeList(FreeList&& other) V8_NOEXCEPT
     : free_list_heads_(std::move(other.free_list_heads_)),
       free_list_tails_(std::move(other.free_list_tails_)),
+      category_cache_(other.category_cache_),
       biggest_free_list_index_(std::move(other.biggest_free_list_index_)) {
   other.Clear();
 }
@@ -91,7 +93,11 @@ std::pair<Address, Address> FreeList::AddReturningUnusedBounds(Block block) {
 
   Entry& entry = Entry::CreateAt(block.address, size);
   const size_t index = BucketIndexForSize(static_cast<uint32_t>(size));
+  const bool was_empty = (free_list_heads_[index] == nullptr);
   entry.Link(&free_list_heads_[index]);
+  if (was_empty) {
+    category_cache_.UpdateAfterAddition(static_cast<int>(index));
+  }
   biggest_free_list_index_ = std::max(biggest_free_list_index_, index);
   if (!entry.Next()) {
     free_list_tails_[index] = &entry;
@@ -114,6 +120,7 @@ void FreeList::Append(FreeList&& other) {
       other_tail->SetNext(this_head);
       if (!this_head) {
         this->free_list_tails_[index] = other_tail;
+        category_cache_.UpdateAfterAddition(static_cast<int>(index));
       }
       this_head = other.free_list_heads_[index];
       other.free_list_heads_[index] = nullptr;
@@ -121,50 +128,117 @@ void FreeList::Append(FreeList&& other) {
     }
   }
 
+  other.category_cache_.Reset();
   biggest_free_list_index_ =
       std::max(biggest_free_list_index_, other.biggest_free_list_index_);
   other.biggest_free_list_index_ = 0;
 #if DEBUG
+  category_cache_.CheckIntegrity(
+      static_cast<int>(kPageSizeLog2) - 1,
+      [this](int cat) { return free_list_heads_[cat] == nullptr; });
+  DCHECK_EQ(expected_size, Size());
+#endif
+  DCHECK(other.IsEmpty());
+}
+
+void FreeList::AppendToTail(FreeList&& other) {
+  DCHECK_NE(this, &other);
+#if DEBUG
+  const size_t expected_size = Size() + other.Size();
+#endif
+  for (size_t index = 0; index < free_list_tails_.size(); ++index) {
+    Entry* other_head = other.free_list_heads_[index];
+    if (other_head) {
+      Entry*& this_tail = this->free_list_tails_[index];
+      if (this_tail) {
+        this_tail->SetNext(other_head);
+      } else {
+        DCHECK_NULL(this->free_list_heads_[index]);
+        this->free_list_heads_[index] = other_head;
+        category_cache_.UpdateAfterAddition(static_cast<int>(index));
+      }
+      this_tail = other.free_list_tails_[index];
+      other.free_list_heads_[index] = nullptr;
+      other.free_list_tails_[index] = nullptr;
+    }
+  }
+
+  other.category_cache_.Reset();
+  biggest_free_list_index_ =
+      std::max(biggest_free_list_index_, other.biggest_free_list_index_);
+  other.biggest_free_list_index_ = 0;
+#if DEBUG
+  category_cache_.CheckIntegrity(
+      static_cast<int>(kPageSizeLog2) - 1,
+      [this](int cat) { return free_list_heads_[cat] == nullptr; });
   DCHECK_EQ(expected_size, Size());
 #endif
   DCHECK(other.IsEmpty());
 }
 
 FreeList::Block FreeList::Allocate(size_t allocation_size) {
-  // Try reusing a block from the largest bin. The underlying reasoning
-  // being that we want to amortize this slow allocation call by carving
-  // off as a large a free block as possible in one go; a block that will
-  // service this block and let following allocations be serviced quickly
-  // by bump allocation.
-  // bucket_size represents minimal size of entries in a bucket.
-  size_t bucket_size = static_cast<size_t>(1) << biggest_free_list_index_;
-  size_t index = biggest_free_list_index_;
-  for (; index > 0; --index, bucket_size >>= 1) {
-    DCHECK(IsConsistent(index));
+  // Mirror V8 JS's `FreeListManyCachedFastPathBase`: jump directly to non-empty
+  // medium LAB categories (>= 2 KiB, bucket 11) via `FreeListCategoryCache`
+  // before falling back to smaller precise categories or larger nearly-empty
+  // page blocks.
+  static constexpr int kMinLabBucket = 11;
+  static constexpr int kNumBuckets = static_cast<int>(kPageSizeLog2);
+  const uint32_t clamped_size =
+      static_cast<uint32_t>(std::max(allocation_size, sizeof(Entry)));
+  const int min_bucket = static_cast<int>(BucketIndexForSize(clamped_size));
+
+  const auto try_pop_bucket = [this, allocation_size](int index) -> Block {
+    DCHECK(IsConsistent(static_cast<size_t>(index)));
     Entry* entry = free_list_heads_[index];
-    if (allocation_size > bucket_size) {
-      // Final bucket candidate; check initial entry if it is able
-      // to service this allocation. Do not perform a linear scan,
-      // as it is considered too costly.
-      if (!entry || entry->AllocatedSize() < allocation_size) break;
+    if (!entry || entry->AllocatedSize() < allocation_size) {
+      return {nullptr, 0u};
     }
-    if (entry) {
-      if (!entry->Next()) {
-        DCHECK_EQ(entry, free_list_tails_[index]);
-        free_list_tails_[index] = nullptr;
+    if (!entry->Next()) {
+      DCHECK_EQ(entry, free_list_tails_[index]);
+      free_list_tails_[index] = nullptr;
+      category_cache_.UpdateAfterRemoval(index);
+    }
+    entry->Unlink(&free_list_heads_[index]);
+    if (static_cast<size_t>(index) == biggest_free_list_index_) {
+      while (biggest_free_list_index_ > 0 &&
+             !free_list_heads_[biggest_free_list_index_]) {
+        --biggest_free_list_index_;
       }
-      entry->Unlink(&free_list_heads_[index]);
-      biggest_free_list_index_ = index;
-      return {entry, entry->AllocatedSize()};
+    }
+    return {entry, entry->AllocatedSize()};
+  };
+
+  const int fast_start = std::max(min_bucket, kMinLabBucket);
+  for (int index = category_cache_.FirstNonEmpty(fast_start);
+       index < kNumBuckets; index = category_cache_.FirstNonEmpty(index + 1)) {
+    if (Block block = try_pop_bucket(index); block.address) {
+      return block;
     }
   }
-  biggest_free_list_index_ = index;
+
+  if (min_bucket < kMinLabBucket) {
+    // Prefer the largest non-empty bucket below `kMinLabBucket` down to
+    // `min_bucket`, skipping empty ranges via `category_cache_`.
+    int candidate = -1;
+    for (int index = category_cache_.FirstNonEmpty(min_bucket);
+         index < kMinLabBucket;
+         index = category_cache_.FirstNonEmpty(index + 1)) {
+      if (free_list_heads_[index]->AllocatedSize() >= allocation_size) {
+        candidate = index;
+      }
+    }
+    if (candidate >= 0) {
+      return try_pop_bucket(candidate);
+    }
+  }
+
   return {nullptr, 0u};
 }
 
 void FreeList::Clear() {
   std::fill(free_list_heads_.begin(), free_list_heads_.end(), nullptr);
   std::fill(free_list_tails_.begin(), free_list_tails_.end(), nullptr);
+  category_cache_.Reset();
   biggest_free_list_index_ = 0;
 }
 

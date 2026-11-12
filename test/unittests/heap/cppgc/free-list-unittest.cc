@@ -193,5 +193,52 @@ TEST(FreeListTest, Allocate) {
   EXPECT_EQ(0u, empty_block.size);
 }
 
+TEST(FreeListTest, AllocatePrefersMediumLabBeforeSparseLargeBlocks) {
+  Block sparse_large_block(kPageSize / 2);  // Largest normal free-list bucket
+  Block medium_lab_block(1u << 11);         // 2 KiB (bucket 11)
+  Block tiny_block(1u << 5);                // 32 B (bucket 5)
+
+  FreeList list;
+  list.Add({sparse_large_block.Address(), sparse_large_block.Size()});
+  list.Add({medium_lab_block.Address(), medium_lab_block.Size()});
+  list.Add({tiny_block.Address(), tiny_block.Size()});
+
+  // Small allocation should prefer the 2 KiB LAB bucket before carving into the
+  // 64 KiB sparse-page block.
+  const auto first = list.Allocate(32);
+  EXPECT_EQ(medium_lab_block.Address(), first.address);
+  EXPECT_EQ(medium_lab_block.Size(), first.size);
+
+  // Next small allocation uses the 64 KiB block before falling back to tiny
+  // sub-LAB blocks.
+  const auto second = list.Allocate(32);
+  EXPECT_EQ(sparse_large_block.Address(), second.address);
+  EXPECT_EQ(sparse_large_block.Size(), second.size);
+
+  // Finally falls back to the tiny 32 B block.
+  const auto third = list.Allocate(32);
+  EXPECT_EQ(tiny_block.Address(), third.address);
+  EXPECT_EQ(tiny_block.Size(), third.size);
+}
+
+TEST(FreeListTest, AppendToTailPreservesHeadPriority) {
+  Block head_block(1u << 12);
+  Block tail_block(1u << 12);
+
+  FreeList main_list;
+  main_list.Add({head_block.Address(), head_block.Size()});
+
+  FreeList sparse_list;
+  sparse_list.Add({tail_block.Address(), tail_block.Size()});
+
+  main_list.AppendToTail(std::move(sparse_list));
+  EXPECT_TRUE(sparse_list.IsEmpty());
+
+  const auto first = main_list.Allocate(32);
+  EXPECT_EQ(head_block.Address(), first.address);
+  const auto second = main_list.Allocate(32);
+  EXPECT_EQ(tail_block.Address(), second.address);
+}
+
 }  // namespace internal
 }  // namespace cppgc
